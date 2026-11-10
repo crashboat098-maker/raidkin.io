@@ -193,8 +193,8 @@ export const GameConfig = {
         /** Time between a soldier's attacks (ms), slightly randomised (+/-10%). */
         attackIntervalMs: 500,
         /** Soldiers move to fight enemies within this distance of themselves... */
-        engageRadius: 40,
-        /** ...but never chase further than this beyond their own cluster's edge. */
+        engageRadius: 22,
+        /** ...but only enemies within this distance of the soldier's own spot in the formation. */
         engageLeash: 30,
         /** An army starts healing after this long without dealing or taking damage (ms). */
         regenDelayMs: 60_000,

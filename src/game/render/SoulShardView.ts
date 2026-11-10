@@ -20,6 +20,14 @@ interface ShardSprites {
 /** Glow of the rare green crystals. */
 const GREEN_GLOW = hexToInt('#5dff8a');
 
+export interface ViewRect { x: number; y: number; width: number; height: number }
+
+/** Is a point within (or just around) the camera's view? */
+export function onView (view: ViewRect, x: number, y: number, margin = 32): boolean
+{
+    return x > view.x - margin && x < view.x + view.width + margin && y > view.y - margin && y < view.y + view.height + margin * 2;
+}
+
 export class SoulShardView
 {
     private readonly sprites = new Map<number, ShardSprites>();
@@ -44,13 +52,21 @@ export class SoulShardView
         }
     }
 
-    /** Gentle floating and glow pulse. Call every frame. */
-    update (time: number, shards: readonly SoulShard[]): void
+    /** Gentle floating and glow pulse. Call every frame. Shards outside `view` aren't drawn. */
+    update (time: number, shards: readonly SoulShard[], view?: ViewRect): void
     {
         for (const shard of shards)
         {
             const sprites = this.sprites.get(shard.id);
             if (!sprites || !sprites.visible) continue;
+            const onScreen = !view || onView(view, shard.x, shard.y);
+            if (sprites.crystal.visible !== onScreen)
+            {
+                sprites.crystal.setVisible(onScreen);
+                sprites.glow.setVisible(onScreen);
+                sprites.shadow.setVisible(onScreen);
+            }
+            if (!onScreen) continue;
 
             const wave = Math.sin(time * 0.004 + sprites.phase);
             // Whole-pixel bob keeps the pixel art crisp.

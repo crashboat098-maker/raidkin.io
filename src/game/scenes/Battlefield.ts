@@ -21,8 +21,10 @@ import { createPlaceholderTextures, Tex } from '../render/PlaceholderArt';
 import { SeeThroughGroup } from '../render/SeeThrough';
 import { SoulShardView } from '../render/SoulShardView';
 import { buildStructureView } from '../render/StructureView';
+import { ViewCuller } from '../render/ViewCuller';
 import { ArmyLabels, ArmyMarkers, ArmyView, LeaderCrown, NeutralView, playJoinEffect, type WaterFx } from '../render/UnitViews';
 import type { HudData } from './Hud';
+import type { DefeatData } from './Defeat';
 
 /**
  * The main playable scene. All game rules live in `World` (pure logic);
@@ -51,6 +53,7 @@ export class Battlefield extends Scene
     private fallenView: FallenView;
     private neutralView: NeutralView;
     private seeThrough: SeeThroughGroup;
+    private culler: ViewCuller;
     private shardView: SoulShardView;
     private controls: KeyboardControls;
     /** What the camera is following (the human army's steering point). */
@@ -98,8 +101,11 @@ export class Battlefield extends Scene
 
         // 3. Visuals for that world.
         this.seeThrough = new SeeThroughGroup();
+        const sceneryFrom = this.children.list.length;
         buildBattlefieldView(this, layout, this.seeThrough);
         buildStructureView(this, layout.structures, this.seeThrough);
+        // Only the scenery near the camera is drawn (a huge saving on phones).
+        this.culler = new ViewCuller(this.children.list.slice(sceneryFrom), layout.worldWidth, layout.worldHeight);
         this.shardView = new SoulShardView(this, this.world.shards.shards);
         this.fallenView = new FallenView(this);
         this.neutralView = new NeutralView(this, this.world.neutrals.units);
@@ -184,10 +190,12 @@ export class Battlefield extends Scene
         for (const warrior of events.vanished ?? []) this.armyView.release(warrior);
         for (const neutral of events.neutralsGone ?? []) this.neutralView.recruited(neutral);
         for (const neutral of events.neutralsAdded ?? []) this.neutralView.add(neutral);
+        // A whole army let go at once (its player left): skip the burst per soldier.
+        const quietRelease = events.surrendered.length > 8;
         for (const { warrior, neutral } of events.surrendered)
         {
             this.armyView.release(warrior);
-            this.neutralView.add(neutral);
+            this.neutralView.add(neutral, !quietRelease);
         }
         for (const shard of events.shardsCollected) this.shardView.collected(shard);
         for (const shard of events.shardsRespawned) this.shardView.respawned(shard);
@@ -236,8 +244,9 @@ export class Battlefield extends Scene
         }
 
         const living = world.players.filter((p) => p.respawnAt === null);
-        this.shardView.update(time, world.shards.shards);
-        this.neutralView.sync(world.neutrals.units, time);
+        const worldView = this.cameras.main.worldView;
+        this.shardView.update(time, world.shards.shards, worldView);
+        this.neutralView.sync(world.neutrals.units, time, worldView);
         // Dynamic zoom: fit the player's whole army (every cluster) on screen.
         const camera = this.cameras.main;
         if (human.respawnAt === null)
@@ -255,20 +264,21 @@ export class Battlefield extends Scene
         this.armyLabels.sync(world.players);
         this.crown.sync(world.players, leaderId(rankPlayers(world.players)), time);
         this.fallenView.sync(time, camera.worldView);
+        this.culler.update(camera.worldView);
         // Structures/trees turn see-through only for YOUR soldiers (enemies behind cover stay hidden).
         this.seeThrough.update(human.respawnAt === null ? allWarriors(human.army).map((w) => w.position) : []);
         this.followHuman();
 
-        // The player's last soldier fell: a moment to see it happen, then back to the
-        // start menu (to change name or colour), with how it went shown there.
+        // The player's last soldier fell: a moment to see it happen, then their
+        // stats for the run (kills, largest army, shards, time, rank) over the
+        // battlefield, with PLAY AGAIN / CHANGE ARMY.
         if (!this.defeatShown && world.humanDefeated)
         {
             this.defeatShown = true;
             const stats = world.defeatStats(time);
-            const notice = `DEFEATED - RANK ${stats.rank} OF ${stats.competitors} - KILLS ${stats.kills}`;
             this.time.delayedCall(DEFEAT_PAUSE_MS, () => {
-                this.scene.stop('Hud');
-                this.scene.start('Start', { ...this.settings, notice });
+                const data: DefeatData = { settings: this.settings, ...stats };
+                this.scene.launch('Defeat', data);
             });
         }
     }

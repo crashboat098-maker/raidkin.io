@@ -34,6 +34,8 @@ export class SeeThroughGroup
     {
         for (const o of this.occluders)
         {
+            // Off-screen (culled) scenery doesn't need checking.
+            if (!o.sprite.visible) continue;
             const isBehind = points.some((p) => p.y < o.baseY && p.y > o.top && Math.abs(p.x - o.x) < o.halfWidth);
             const target = isBehind ? SEE_THROUGH_ALPHA : 1;
             const alpha = o.sprite.alpha;

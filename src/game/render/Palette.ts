@@ -78,6 +78,12 @@ export const Palette = {
         violet: { main: '#6c3c9c', dark: '#43245f', name: 'VIOLET' },
         gold: { main: '#b8911f', dark: '#755c12', name: 'GOLD' },
         ember: { main: '#c0612a', dark: '#7a3a17', name: 'EMBER' },
+        frost: { main: '#2bb7cf', dark: '#16707f', name: 'FROST' },
+        rose: { main: '#d45a9c', dark: '#87325f', name: 'ROSE' },
+        ivory: { main: '#e4e0d4', dark: '#a39f92', name: 'IVORY' },
+        onyx: { main: '#2c2d33', dark: '#16171a', name: 'ONYX' },
+        lime: { main: '#9ccc2f', dark: '#5e7d17', name: 'LIME' },
+        steel: { main: '#8d97a8', dark: '#565e6b', name: 'STEEL' },
     },
 
     health: { high: '#5cc24a', mid: '#e0c23a', low: '#d8432f', back: '#1a1512' },
@@ -87,8 +93,12 @@ export const Palette = {
 } as const;
 
 export type ArmyColor = keyof typeof Palette.armies;
-/** The six colours a player can choose, in menu order. */
-export const ARMY_COLORS: readonly ArmyColor[] = ['crimson', 'azure', 'emerald', 'violet', 'gold', 'ember'];
+/** The colours a player can choose, in menu order (a 4 x 3 grid on the start screen). */
+export const ARMY_COLORS: readonly ArmyColor[] = [
+    'azure', 'crimson', 'gold', 'violet',
+    'ember', 'frost', 'rose', 'ivory',
+    'onyx', 'emerald', 'lime', 'steel',
+];
 
 /** Colours for the bots: every colour except the human's, in a fixed order. */
 export function botColorsFor (humanColor: ArmyColor): ArmyColor[]

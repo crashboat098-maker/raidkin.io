@@ -86,6 +86,9 @@ export interface PlayerCommand {
     surrender: Vec2 | null;
 }
 
+/** Soldiers left behind by a player who quit can be collected after this short pause (ms). */
+const LEFT_ARMY_GRACE_MS = 1000;
+
 const IDLE_COMMAND: PlayerCommand = { move: { x: 0, y: 0 }, split: null, surrender: null };
 
 export interface WorldOptions {
@@ -174,11 +177,27 @@ export class World implements GameWorld
         return p;
     }
 
-    /** Someone left: their army disappears from the battlefield. */
-    removePlayer (p: Player): void
+    /**
+     * Someone left: their army leaves the battlefield, but its soldiers stay
+     * behind as neutrals, right where they stood, for anyone to collect.
+     * Returns the released soldiers (and the neutral each became).
+     */
+    removePlayer (p: Player, now = 0): { warrior: Warrior; neutral: NeutralWarrior }[]
     {
         const index = this.players.indexOf(p);
         if (index >= 0) this.players.splice(index, 1);
+        if (!this.isAlive(p)) return [];
+
+        const released: { warrior: Warrior; neutral: NeutralWarrior }[] = [];
+        for (const warrior of allWarriors(p.army))
+        {
+            if (warrior.hp <= 0) continue;
+            const neutral = this.neutrals.addSurrendered(warrior.position, warrior.position, warrior.role, now + LEFT_ARMY_GRACE_MS, this.obstacles);
+            neutral.facing = warrior.facing;
+            released.push({ warrior, neutral });
+        }
+        for (const { cluster } of p.army.clusters) cluster.warriors = [];
+        return released;
     }
 
     get bots (): Player[]
