@@ -1,4 +1,4 @@
-import { findFreeSpotNear, hasClearPath, WARRIOR_BODY } from './Army';
+import { findFreeSpotNear, hasClearPath, WARRIOR_BODY, type SoldierRole } from './Army';
 import type { BattlefieldLayout } from './BattlefieldLayout';
 import type { ObstacleMap } from './Obstacles';
 import { createRng, randInt, randRange, type Rng } from './Random';
@@ -13,8 +13,13 @@ import type { Rect, Vec2 } from './Types';
  * Pure logic, no Phaser.
  */
 
-/** 'sylvan': hooded forest folk of the enchanted forest (in its village and roaming the woods). */
-export type NeutralKind = 'wanderer' | 'garrison' | 'villager' | 'sylvan' | 'ashen' | 'bogfolk';
+/**
+ * 'sylvan': hooded forest folk of the enchanted forest (in its village and roaming the woods).
+ * 'surrendered': a soldier released by an army. It isn't tied to a site: it
+ * can't be taken for a few seconds, then anyone (its old army too) can
+ * recruit it, and it's gone for good once recruited.
+ */
+export type NeutralKind = 'wanderer' | 'garrison' | 'villager' | 'sylvan' | 'ashen' | 'bogfolk' | 'surrendered';
 
 export interface NeutralWarrior {
     /** Unit id. A fresh id is given each time the site refills. */
@@ -36,6 +41,10 @@ export interface NeutralWarrior {
     nextWanderAt: number;
     /** How far it strays from home (world px). */
     roam: number;
+    /** Nobody can recruit it before this time (surrendered soldiers; 0 for everyone else). */
+    recruitableAt: number;
+    /** What it joins as when recruited (a surrendered Archer stays an Archer). */
+    role: SoldierRole;
 }
 
 export interface NeutralSettings {
@@ -55,12 +64,15 @@ const WANDERER_SPACING = 140;
 const GARRISON_POSTS: Vec2[] = [{ x: -15, y: 16 }, { x: 15, y: 16 }, { x: 0, y: 27 }];
 /** Villagers mill about their village square. */
 const VILLAGE_ROAM = 10;
+/** How much faster than a stroll a surrendered soldier walks out to where it was sent. */
+const SURRENDER_WALK_SPEEDUP = 3;
 
 export class NeutralForces
 {
     readonly units: NeutralWarrior[] = [];
     private readonly rng: Rng;
     private readonly bounds: Rect;
+    private nextSiteId = 0;
 
     constructor (
         layout: BattlefieldLayout,
@@ -120,6 +132,23 @@ export class NeutralForces
             homes.push(home);
             this.units.push(this.createUnit(siteId++, 'wanderer', home));
         }
+        this.nextSiteId = siteId;
+    }
+
+    /**
+     * A soldier an army let go: it becomes a neutral at `from`, walks out to
+     * `destination`, and wanders there. Recruitable by anyone from `recruitableAt`.
+     */
+    addSurrendered (from: Vec2, destination: Vec2, role: SoldierRole, recruitableAt: number, obstacles: ObstacleMap): NeutralWarrior
+    {
+        const unit = this.createUnit(this.nextSiteId++, 'surrendered', from, undefined, this.settings.wanderRadius);
+        unit.home = { x: destination.x, y: destination.y };
+        unit.role = role;
+        unit.recruitableAt = recruitableAt;
+        unit.nextWanderAt = recruitableAt;
+        if (hasClearPath(obstacles, from, destination)) unit.wanderTarget = { x: destination.x, y: destination.y };
+        this.units.push(unit);
+        return unit;
     }
 
     /**
@@ -131,7 +160,7 @@ export class NeutralForces
         if (maxCount <= 0) return [];
 
         const inRange = this.units
-            .filter((u) => u.available && distance(u.position, position) <= this.settings.recruitRange)
+            .filter((u) => u.available && now >= u.recruitableAt && distance(u.position, position) <= this.settings.recruitRange)
             .sort((a, b) => distance(a.position, position) - distance(b.position, position))
             .slice(0, maxCount);
 
@@ -141,6 +170,12 @@ export class NeutralForces
             unit.available = false;
             unit.respawnAt = now + randRange(this.rng, min, max);
             unit.isMoving = false;
+        }
+        // Surrendered soldiers have no site to refill: they're gone once taken.
+        if (inRange.some((u) => u.kind === 'surrendered'))
+        {
+            const taken = new Set(inRange.filter((u) => u.kind === 'surrendered'));
+            for (let i = this.units.length - 1; i >= 0; i--) if (taken.has(this.units[i])) this.units.splice(i, 1);
         }
         return inRange;
     }
@@ -211,7 +246,9 @@ export class NeutralForces
             return;
         }
 
-        const speed = this.settings.wanderSpeed * (isGuard ? 0.6 : 1) * obstacles.speedFactorAt(unit.position.x, unit.position.y);
+        // A freshly surrendered soldier walks briskly away from the army it left.
+        const leaving = now < unit.recruitableAt ? SURRENDER_WALK_SPEEDUP : 1;
+        const speed = this.settings.wanderSpeed * (isGuard ? 0.6 : 1) * leaving * obstacles.speedFactorAt(unit.position.x, unit.position.y);
         unit.velocity.x = (dx / d) * speed;
         unit.velocity.y = (dy / d) * speed;
         const moved = obstacles.move(unit.position, WARRIOR_BODY, unit.velocity.x * dt, unit.velocity.y * dt);
@@ -238,6 +275,8 @@ export class NeutralForces
             respawnAt: 0,
             wanderTarget: null,
             nextWanderAt: 0,
+            recruitableAt: 0,
+            role: 'warrior',
         };
         unit.nextWanderAt = randRange(this.rng, 0, 3000);
         return unit;

@@ -79,10 +79,10 @@ export const GameConfig = {
     movement: {
         /** World pixels per second at full speed, with a 1-soldier army. */
         maxSpeed: 95,
-        /** How quickly the army reaches full speed. */
-        acceleration: 700,
+        /** How quickly the army reaches full speed (and turns: higher = snappier, lower = icier). */
+        acceleration: 1500,
         /** How quickly the army stops after releasing the keys. */
-        deceleration: 900,
+        deceleration: 1700,
     },
 
     soulShards: {
@@ -130,8 +130,15 @@ export const GameConfig = {
             maxClusters: 16,
             /** Minimum time between two splits (ms); just enough to stop accidental double splits. */
             cooldownMs: 200,
-            /** Clusters created by a split regroup automatically this long after it (ms). */
-            regroupAfterMs: 10_000,
+            /**
+             * After a split, each cluster returns to the cluster it split from.
+             * Small clusters return sooner, big ones later:
+             * delay = minMs + soldiers x perSoldierMs, capped at maxMs (counted
+             * from the cluster's last split, and growing as children rejoin it).
+             * A cluster waits for children already on their way back (at most
+             * maxWaitForReturnMs extra), so merges cascade up into one army.
+             */
+            regroup: { minMs: 3000, perSoldierMs: 200, maxMs: 18_000, maxWaitForReturnMs: 8000 },
             /** Visible gap kept between neighbouring clusters' edges (world px). */
             clusterGap: 12,
             /** Cluster centres may move this much faster than the army to keep up / converge. */
@@ -148,7 +155,8 @@ export const GameConfig = {
         warriorSpeed: 108,
         /** Extra speed multiplier when a Warrior has fallen far behind. */
         catchUpMultiplier: 1.4,
-        warriorAcceleration: 600,
+        /** How quickly a Warrior speeds up and turns (higher = snappier, lower = icier). */
+        warriorAcceleration: 1400,
         /** Warriors gently push apart when closer than this. */
         separationDistance: 10,
         /** How often each Warrior re-plans its route (ms). Staggered across Warriors. */
@@ -246,6 +254,13 @@ export const GameConfig = {
         respawnDelayMs: { min: 30000, max: 45000 },
         /** ...and only refills when no player is this close (no instant farming). */
         respawnPlayerClearance: 160,
+        /**
+         * Surrender (Q or right-click): one soldier leaves the army toward the
+         * mouse pointer, walking this far (world px) past where it stood. It turns
+         * neutral and can be recruited by anyone, its old army too, once
+         * `fallen.dormantMs` has passed (the same wait as reviving the fallen).
+         */
+        surrender: { releaseDistance: 56 },
     },
 
     /**

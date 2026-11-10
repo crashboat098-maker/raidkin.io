@@ -113,7 +113,7 @@ export class Battlefield extends Scene
             getArmySize: () => (human.respawnAt === null ? totalSoldiers(human.army) : 0),
             getSplitState: () => {
                 if (human.respawnAt !== null || human.army.clusters.length <= 1) return null;
-                return { clusters: human.army.clusters.length, regroupSeconds: secondsUntilRegroup(human.army, this.time.now) };
+                return { clusters: human.army.clusters.length, regroupSeconds: secondsUntilRegroup(human.army, this.time.now, GameConfig.army) };
             },
             getLeaderboard: () => rankPlayers(this.world.players),
             playerColor: this.settings.color,
@@ -132,11 +132,18 @@ export class Battlefield extends Scene
 
         // --- Gameplay (all in World) ---
         const split = this.controls.consumeSplitPress();
-        const events = world.update(time, dt, this.controls.getMoveDirection(), split);
+        const armyAt = human.army.lead.center.position;
+        const surrender = this.controls.consumeSurrender(armyAt, human.army.lead.heading);
+        const events = world.update(time, dt, this.controls.getMoveDirection(armyAt), split, surrender);
 
         // --- Visuals for what happened ---
         for (const point of events.splits) playJoinEffect(this, point.x, point.y, Palette.accent.purple);
         for (const point of events.merges) playJoinEffect(this, point.x, point.y, Palette.accent.amber);
+        for (const { warrior, neutral } of events.surrendered)
+        {
+            this.armyView.release(warrior);
+            this.neutralView.add(neutral);
+        }
         for (const shard of events.shardsCollected) this.shardView.collected(shard);
         for (const shard of events.shardsRespawned) this.shardView.respawned(shard);
         for (const neutral of events.neutralsRespawned) this.neutralView.respawned(neutral);
