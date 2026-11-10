@@ -1,0 +1,22 @@
+body {
+    margin: 0;
+    padding: 0;
+    color: rgba(255, 255, 255, 0.87);
+    /* Near-black so the letterbox bars around the 16:9 game blend in. */
+    background-color: #050605;
+}
+
+#app {
+    width: 100%;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+/* Keep pixel art crisp when the browser scales the canvas to fit the window. */
+#game-container canvas {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+}
