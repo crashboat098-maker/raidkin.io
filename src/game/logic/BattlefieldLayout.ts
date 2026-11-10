@@ -170,6 +170,22 @@ export const DECORATION_COLLIDERS: Partial<Record<DecorationKind, { width: numbe
     swampTotem: { width: 6, depth: 4 },
 };
 
+/**
+ * Decorations that have a solid base for map generation (spacing, roads)
+ * but that armies can walk straight through: trees. Bushes and other
+ * plants have no collider at all. Rocks, logs, ruins and buildings stay solid.
+ */
+const WALK_THROUGH_DECORATIONS: ReadonlySet<DecorationKind> = new Set<DecorationKind>([
+    'largeTree', 'pine', 'deadTree', 'elderTree', 'birch', 'willow', 'charredTree', 'moonTree', 'spiralTree',
+    'goldenOak', 'cypress', 'twistedYew', 'scorchedTree', 'swampTree',
+]);
+
+/** The collider that blocks movement in play (null if armies can walk through it). */
+function movementCollider (d: Decoration): Rect | null
+{
+    return WALK_THROUGH_DECORATIONS.has(d.kind) ? null : decorationCollider(d);
+}
+
 export interface BattlefieldLayout {
     tileSize: number;
     widthInTiles: number;
@@ -378,7 +394,7 @@ function generateCore (settings: LayoutSettings, openEdges: boolean): Battlefiel
     const obstacles: Rect[] = [
         ...structures.flatMap(structureColliders),
         ...decorations.flatMap((d) => {
-            const collider = decorationCollider(d);
+            const collider = movementCollider(d);
             return collider ? [collider] : [];
         }),
         ...pools.map(lavaPoolCollider),
@@ -778,7 +794,7 @@ function expandBattlefield (core: BattlefieldLayout, settings: LayoutSettings, e
     const obstacles: Rect[] = [
         ...structures.flatMap(structureColliders),
         ...decorations.flatMap((d) => {
-            const collider = decorationCollider(d);
+            const collider = movementCollider(d);
             return collider ? [collider] : [];
         }),
         ...pools.map(lavaPoolCollider),

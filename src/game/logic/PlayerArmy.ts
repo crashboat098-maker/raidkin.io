@@ -15,9 +15,12 @@ import type { Rect, Vec2 } from './Types';
  * lead, keeping its own compact formation and a visible gap from the other
  * clusters. Pressing SPACE splits each cluster (with 2+ soldiers) in half.
  * Army speed comes from the LARGEST cluster, so splitting makes the whole
- * army faster. 10 seconds after a split, those clusters converge and merge
- * again while the army keeps moving. Splitting only moves soldiers between
- * clusters; it never creates or removes any.
+ * army faster. Every cluster remembers the cluster it split from (its
+ * parent). After a while, small clusters sooner and big ones later, it
+ * marches back and merges into its parent, which grows; parents wait for
+ * children on their way back, so merges cascade up into one army again.
+ * The first cluster (the root) never leaves. Splitting only moves soldiers
+ * between clusters; it never creates or removes any.
  *
  * All soldiers are equal. There's no commander: the player is alive as long
  * as at least one soldier is. One soldier is marked as the "representative"
@@ -34,8 +37,10 @@ type FollowRoute =
 
 export interface ArmyCluster {
     cluster: Cluster;
-    /** When this cluster starts regrouping (it was made by a split at regroupAt - 10 s). */
-    regroupAt: number;
+    /** Id of the cluster this one split from (null for the root, which never regroups). */
+    parentId: number | null;
+    /** When this cluster was last split (its regroup timer counts from here). */
+    splitAt: number;
     route: FollowRoute;
     nextPlanAt: number;
     lastCheckPosition: Vec2;
@@ -47,6 +52,8 @@ export interface PlayerArmy {
     lead: Cluster;
     clusters: ArmyCluster[];
     nextClusterId: number;
+    /** Every cluster id ever made -> its parent id, so returning clusters can skip parents that are gone. */
+    parentOf: Map<number, number | null>;
     lastSplitAt: number;
     /** The soldier wearing the amber marker (cosmetic only). */
     representativeId: number | null;
@@ -59,7 +66,7 @@ export interface PlayerArmySettings extends ClusterSettings {
         minSoldiers: number;
         maxClusters: number;
         cooldownMs: number;
-        regroupAfterMs: number;
+        regroup: { minMs: number; perSoldierMs: number; maxMs: number; maxWaitForReturnMs: number };
         clusterGap: number;
         followSpeedMultiplier: number;
         replanMs: number;
@@ -73,11 +80,12 @@ const STUCK_DISTANCE = 4;
 /** Only breadcrumbs this close are considered when re-planning (keeps checks short and cheap). */
 const CRUMB_SEARCH_RADIUS = 220;
 
-function wrapCluster (cluster: Cluster, regroupAt: number): ArmyCluster
+function wrapCluster (cluster: Cluster, parentId: number | null, splitAt: number): ArmyCluster
 {
     return {
         cluster,
-        regroupAt,
+        parentId,
+        splitAt,
         route: { mode: 'direct' },
         nextPlanAt: 0,
         lastCheckPosition: { ...cluster.center.position },
@@ -89,8 +97,9 @@ export function createPlayerArmy (spawn: Vec2): PlayerArmy
 {
     return {
         lead: createCluster(0, spawn),
-        clusters: [wrapCluster(createCluster(1, spawn), -Infinity)],
+        clusters: [wrapCluster(createCluster(1, spawn), null, -Infinity)],
         nextClusterId: 2,
+        parentOf: new Map([[1, null]]),
         lastSplitAt: -Infinity,
         representativeId: null,
     };
@@ -128,13 +137,94 @@ export function armySpeedMultiplier (army: PlayerArmy, settings: PlayerArmySetti
     return speedMultiplier(largestClusterSize(army), settings.speedCurve, settings.minSpeedMultiplier);
 }
 
-/** Seconds until the next split cluster starts regrouping (null if the army is whole or already regrouping). */
-export function secondsUntilRegroup (army: PlayerArmy, now: number): number | null
+/** Seconds until the next split cluster starts heading back (null if the army is whole or already regrouping). */
+export function secondsUntilRegroup (army: PlayerArmy, now: number, settings: PlayerArmySettings): number | null
 {
     if (army.clusters.length <= 1) return null;
-    const waiting = army.clusters.filter((c) => c.regroupAt > now);
+    const waiting = army.clusters.map((c) => regroupTime(c, settings)).filter((t) => t > now && Number.isFinite(t));
     if (waiting.length === 0) return null;
-    return Math.min(...waiting.map((c) => c.regroupAt)) / 1000 - now / 1000;
+    return (Math.min(...waiting) - now) / 1000;
+}
+
+/** How long a cluster of `soldiers` stays split before heading back: small ones sooner, big ones later. */
+export function regroupDelayMs (soldiers: number, settings: PlayerArmySettings): number
+{
+    const r = settings.split.regroup;
+    return Math.min(r.maxMs, r.minMs + soldiers * r.perSoldierMs);
+}
+
+/** When this cluster heads back to its parent (never for the root). */
+function regroupTime (ac: ArmyCluster, settings: PlayerArmySettings): number
+{
+    if (ac.parentId === null) return Infinity;
+    return ac.splitAt + regroupDelayMs(ac.cluster.warriors.length, settings);
+}
+
+/** The cluster this one returns to: its parent, or the nearest ancestor still around. */
+function findParent (army: PlayerArmy, ac: ArmyCluster): ArmyCluster | null
+{
+    let id = ac.parentId;
+    const seen = new Set<number>();
+    while (id !== null && !seen.has(id))
+    {
+        seen.add(id);
+        const found = army.clusters.find((c) => c.cluster.id === id);
+        if (found && found !== ac) return found;
+        id = army.parentOf.get(id) ?? null;
+    }
+    return null;
+}
+
+/** Keep exactly one root, and give clusters whose whole ancestry is gone (wiped out in combat) the root as parent. */
+function repairFamily (army: PlayerArmy): void
+{
+    let root = army.clusters.find((c) => c.parentId === null);
+    if (!root)
+    {
+        root = army.clusters.reduce((a, b) => (b.cluster.warriors.length > a.cluster.warriors.length ? b : a));
+        root.parentId = null;
+        army.parentOf.set(root.cluster.id, null);
+    }
+    for (const ac of army.clusters)
+    {
+        if (ac === root) continue;
+        if (ac.parentId === null || !findParent(army, ac))
+        {
+            ac.parentId = root.cluster.id;
+            army.parentOf.set(ac.cluster.id, root.cluster.id);
+        }
+    }
+}
+
+interface RegroupPlan {
+    /** Clusters keeping a spot around the lead (the root, clusters still split, and parents waiting for children). */
+    holding: ArmyCluster[];
+    /** Clusters heading back, each to its parent. */
+    returning: Map<ArmyCluster, ArmyCluster>;
+}
+
+/**
+ * Who heads back this frame. A cluster heads back once its time is up,
+ * unless children of its own are already due back: then it waits for
+ * them (up to maxWaitForReturnMs), so the smallest clusters merge first.
+ */
+function planRegroup (army: PlayerArmy, now: number, settings: PlayerArmySettings): RegroupPlan
+{
+    const parents = new Map<ArmyCluster, ArmyCluster | null>();
+    for (const ac of army.clusters) parents.set(ac, findParent(army, ac));
+    const due = (ac: ArmyCluster) => parents.get(ac) !== null && regroupTime(ac, settings) <= now;
+
+    const holding: ArmyCluster[] = [];
+    const returning = new Map<ArmyCluster, ArmyCluster>();
+    for (const ac of army.clusters)
+    {
+        const parent = parents.get(ac) ?? null;
+        const waitingForChildren = now < regroupTime(ac, settings) + settings.split.regroup.maxWaitForReturnMs
+            && army.clusters.some((c) => c !== ac && parents.get(c) === ac && due(c));
+        if (parent && due(ac) && !waitingForChildren) returning.set(ac, parent);
+        else holding.push(ac);
+    }
+    return { holding, returning };
 }
 
 /** Total emergency recoveries across clusters (for testing/tuning). */
@@ -176,7 +266,6 @@ export function splitArmy (
     const heading = army.lead.heading;
     // "Right" relative to the direction of travel.
     const side = { x: -heading.y, y: heading.x };
-    const regroupAt = now + settings.split.regroupAfterMs;
     const candidates = army.clusters
         .filter((c) => c.cluster.warriors.length >= settings.split.minSoldiers)
         .sort((a, b) => b.cluster.warriors.length - a.cluster.warriors.length);
@@ -208,8 +297,10 @@ export function splitArmy (
         reassignSlots(cluster, settings.formationSpacing);
         reassignSlots(newCluster, settings.formationSpacing);
 
-        original.regroupAt = regroupAt;
-        army.clusters.push(wrapCluster(newCluster, regroupAt));
+        // The new half is the original's child: it returns to it later.
+        original.splitAt = now;
+        army.parentOf.set(newCluster.id, cluster.id);
+        army.clusters.push(wrapCluster(newCluster, cluster.id, now));
         created.push({ ...leftCentre }, { ...rightCentre });
     }
 
@@ -241,8 +332,10 @@ export function updatePlayerArmy (
 {
     // Drop clusters that have lost all their soldiers (future combat), but keep at least one.
     if (army.clusters.length > 1) army.clusters = army.clusters.filter((c) => c.cluster.warriors.length > 0);
+    repairFamily(army);
 
-    const targets = clusterTargets(army, now, obstacles, bounds, settings);
+    const plan = planRegroup(army, now, settings);
+    const targets = clusterTargets(army, plan, obstacles, bounds, settings);
 
     // The lead: player-controlled, speed set by the largest cluster, slowed if the army lags.
     const armySpeed = movement.maxSpeed * armySpeedMultiplier(army, settings);
@@ -254,11 +347,11 @@ export function updatePlayerArmy (
     for (const ac of army.clusters)
     {
         const target = targets.get(ac) ?? army.lead.center.position;
-        steerCluster(ac, target, army, armySpeed, dt, now, obstacles, bounds, settings, movement);
+        steerCluster(ac, target, army, plan, armySpeed, dt, now, obstacles, bounds, settings, movement);
         updateCluster(ac.cluster, dt, now, obstacles, bounds, settings);
     }
 
-    const merges = mergeTouching(army, now, settings);
+    const merges = mergeReturning(army, plan, settings);
     updateRepresentative(army);
     return { merges };
 }
@@ -268,17 +361,15 @@ export function updatePlayerArmy (
 // ---------------------------------------------------------------------------
 
 /**
- * Clusters still in their split time get spots arranged around the lead
- * (a small sunflower pattern spaced so they don't touch). Clusters whose
- * regroup time has come head for the nearest still-split cluster, or the
- * lead if everyone is regrouping, so they converge and merge.
+ * Holding clusters get spots arranged around the lead (a small sunflower
+ * pattern spaced so they don't touch). Returning clusters head for their
+ * parent so they merge into it.
  */
-function clusterTargets (army: PlayerArmy, now: number, obstacles: ObstacleMap, bounds: Rect, settings: PlayerArmySettings): Map<ArmyCluster, Vec2>
+function clusterTargets (army: PlayerArmy, plan: RegroupPlan, obstacles: ObstacleMap, bounds: Rect, settings: PlayerArmySettings): Map<ArmyCluster, Vec2>
 {
     const targets = new Map<ArmyCluster, Vec2>();
     const lead = army.lead.center.position;
-    const holding = army.clusters.filter((c) => c.regroupAt > now).sort((a, b) => a.cluster.id - b.cluster.id);
-    const regrouping = army.clusters.filter((c) => c.regroupAt <= now);
+    const holding = [...plan.holding].sort((a, b) => a.cluster.id - b.cluster.id);
 
     if (holding.length > 0)
     {
@@ -287,17 +378,7 @@ function clusterTargets (army: PlayerArmy, now: number, obstacles: ObstacleMap, 
         holding.forEach((ac, i) => targets.set(ac, freeTowardLead(lead, offsets[i], obstacles, bounds)));
     }
 
-    for (const ac of regrouping)
-    {
-        let goal = lead;
-        let best = Infinity;
-        for (const h of holding)
-        {
-            const d = distance(h.cluster.center.position, ac.cluster.center.position);
-            if (d < best) { best = d; goal = h.cluster.center.position; }
-        }
-        targets.set(ac, goal);
-    }
+    for (const [ac, parent] of plan.returning) targets.set(ac, parent.cluster.center.position);
 
     return targets;
 }
@@ -349,15 +430,36 @@ function freeTowardLead (lead: Vec2, offset: Vec2, obstacles: ObstacleMap, bound
     return lead;
 }
 
-/** Slow the lead when any cluster (or its soldiers) has fallen well behind. */
+/**
+ * Slow the lead when the bulk of the army has fallen well behind.
+ *
+ * Uses the soldier-weighted median lag, not the worst cluster: with several
+ * split clusters one is almost always snagged on something, and waiting for
+ * it would stall the whole army. Stragglers catch up on their own (they move
+ * faster than the army and follow its breadcrumbs).
+ */
 function leashFactor (army: PlayerArmy, targets: Map<ArmyCluster, Vec2>, settings: PlayerArmySettings): number
 {
-    let lag = 0;
+    const lags: { lag: number; weight: number }[] = [];
+    let totalWeight = 0;
     for (const ac of army.clusters)
     {
+        let lag = 0;
         const target = targets.get(ac);
-        if (target) lag = Math.max(lag, distance(ac.cluster.center.position, target));
+        if (target) lag = distance(ac.cluster.center.position, target);
         if (ac.cluster.warriors.length > 0) lag = Math.max(lag, distance(ac.cluster.center.position, centroid(ac.cluster.warriors)));
+        const weight = Math.max(1, ac.cluster.warriors.length);
+        lags.push({ lag, weight });
+        totalWeight += weight;
+    }
+    lags.sort((a, b) => a.lag - b.lag);
+    let lag = 0;
+    let seen = 0;
+    for (const entry of lags)
+    {
+        seen += entry.weight;
+        lag = entry.lag;
+        if (seen >= totalWeight / 2) break;
     }
     const { startDistance, fullStopDistance } = settings.leash;
     if (lag <= startDistance) return 1;
@@ -375,7 +477,7 @@ function leashFactor (army: PlayerArmy, targets: Map<ArmyCluster, Vec2>, setting
  * stuck. Routes are re-planned a few times a second, not every frame.
  */
 function steerCluster (
-    ac: ArmyCluster, target: Vec2, army: PlayerArmy, armySpeed: number, dt: number, now: number,
+    ac: ArmyCluster, target: Vec2, army: PlayerArmy, plan: RegroupPlan, armySpeed: number, dt: number, now: number,
     obstacles: ObstacleMap, bounds: Rect, settings: PlayerArmySettings, movement: MovementTuning,
 ): void
 {
@@ -422,10 +524,10 @@ function steerCluster (
     let throttle = arriving ? Math.min(1, d / 16) : 1;
     if (d > 0.5) { dx /= d; dy /= d; } else { dx = 0; dy = 0; throttle = 0; }
 
-    // Keep a visible gap from neighbouring split clusters (not while regrouping).
-    if (ac.regroupAt > now)
+    // Keep a visible gap from neighbouring split clusters (not while returning).
+    if (!plan.returning.has(ac))
     {
-        const push = clusterSeparation(ac, army, now, settings);
+        const push = clusterSeparation(ac, army, plan, settings);
         dx = dx * throttle + push.x;
         dy = dy * throttle + push.y;
         throttle = 1;
@@ -433,6 +535,14 @@ function steerCluster (
 
     const speed = armySpeed * settings.split.followSpeedMultiplier;
     const input = { x: dx * throttle, y: dy * throttle };
+    // Holding its place in the army: move WITH the lead, plus the correction
+    // above, so the cluster turns the moment the player does instead of
+    // sliding on toward where its spot used to be.
+    if (arriving && !plan.returning.has(ac) && speed > 0)
+    {
+        input.x += lead.center.velocity.x / speed;
+        input.y += lead.center.velocity.y / speed;
+    }
     updateMover(centre, input, dt, bounds, { ...movement, maxSpeed: speed }, obstacles);
 
     // Stuck? Search a small area for a way around.
@@ -472,7 +582,7 @@ function planFollow (from: Vec2, target: Vec2, lead: Cluster, obstacles: Obstacl
 }
 
 /** Gentle push away from other split clusters that are too close. */
-function clusterSeparation (ac: ArmyCluster, army: PlayerArmy, now: number, settings: PlayerArmySettings): Vec2
+function clusterSeparation (ac: ArmyCluster, army: PlayerArmy, plan: RegroupPlan, settings: PlayerArmySettings): Vec2
 {
     const me = ac.cluster;
     const myRadius = clusterRadius(me.warriors.length, settings.formationSpacing);
@@ -480,7 +590,7 @@ function clusterSeparation (ac: ArmyCluster, army: PlayerArmy, now: number, sett
     let py = 0;
     for (const other of army.clusters)
     {
-        if (other === ac || other.regroupAt <= now) continue;
+        if (other === ac || plan.returning.has(other)) continue;
         const wanted = myRadius + clusterRadius(other.cluster.warriors.length, settings.formationSpacing) + settings.split.clusterGap;
         const dx = me.center.position.x - other.cluster.center.position.x;
         const dy = me.center.position.y - other.cluster.center.position.y;
@@ -499,43 +609,30 @@ function clusterSeparation (ac: ArmyCluster, army: PlayerArmy, now: number, sett
 // ---------------------------------------------------------------------------
 
 /**
- * A cluster whose regroup time has come merges into another cluster once
- * they overlap. (A still-split cluster can absorb a regrouping one; the
- * merged group keeps the later regroup time.)
+ * A returning cluster merges into its parent once they overlap. The parent
+ * keeps its identity (and its own children), grows, and so stays split a
+ * little longer before it heads back itself.
  */
-function mergeTouching (army: PlayerArmy, now: number, settings: PlayerArmySettings): Vec2[]
+function mergeReturning (army: PlayerArmy, plan: RegroupPlan, settings: PlayerArmySettings): Vec2[]
 {
     const merges: Vec2[] = [];
-    let merged = true;
-    while (merged && army.clusters.length > 1)
+    // Smallest first, so a parent that absorbs a child this frame still counts as present.
+    const returning = [...plan.returning].sort((a, b) => a[0].cluster.warriors.length - b[0].cluster.warriors.length);
+    for (const [child, parent] of returning)
     {
-        merged = false;
-        for (const a of army.clusters)
-        {
-            if (a.regroupAt > now) continue;
-            for (const b of army.clusters)
-            {
-                if (a === b) continue;
-                const ra = clusterRadius(a.cluster.warriors.length, settings.formationSpacing);
-                const rb = clusterRadius(b.cluster.warriors.length, settings.formationSpacing);
-                if (distance(a.cluster.center.position, b.cluster.center.position) > Math.max(ra, rb)) continue;
+        if (!army.clusters.includes(child) || !army.clusters.includes(parent)) continue;
+        const rc = clusterRadius(child.cluster.warriors.length, settings.formationSpacing);
+        const rp = clusterRadius(parent.cluster.warriors.length, settings.formationSpacing);
+        if (distance(child.cluster.center.position, parent.cluster.center.position) > Math.max(rc, rp)) continue;
 
-                // The bigger cluster absorbs the smaller one.
-                const [keep, gone] = a.cluster.warriors.length >= b.cluster.warriors.length ? [a, b] : [b, a];
-                merges.push({
-                    x: (keep.cluster.center.position.x + gone.cluster.center.position.x) / 2,
-                    y: (keep.cluster.center.position.y + gone.cluster.center.position.y) / 2,
-                });
-                keep.cluster.warriors.push(...gone.cluster.warriors);
-                gone.cluster.warriors = [];
-                keep.regroupAt = Math.max(keep.regroupAt, gone.regroupAt);
-                army.clusters = army.clusters.filter((c) => c !== gone);
-                reassignSlots(keep.cluster, settings.formationSpacing);
-                merged = true;
-                break;
-            }
-            if (merged) break;
-        }
+        merges.push({
+            x: (parent.cluster.center.position.x + child.cluster.center.position.x) / 2,
+            y: (parent.cluster.center.position.y + child.cluster.center.position.y) / 2,
+        });
+        parent.cluster.warriors.push(...child.cluster.warriors);
+        child.cluster.warriors = [];
+        army.clusters = army.clusters.filter((c) => c !== child);
+        reassignSlots(parent.cluster, settings.formationSpacing);
     }
     return merges;
 }

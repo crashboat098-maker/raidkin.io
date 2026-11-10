@@ -1,5 +1,5 @@
 import type { GameConfig as GameConfigType } from '../config/GameConfig';
-import { addWarrior, findFreeSpotNear, WARRIOR_BODY, type SoldierRole, type Warrior } from './Army';
+import { addWarrior, findFreeSpotNear, WARRIOR_BODY, type Cluster, type SoldierRole, type Warrior } from './Army';
 import { generateBattlefield, type BattlefieldLayout } from './BattlefieldLayout';
 import { botInput, createBotState, isRetreating } from './BotBrain';
 import { assignEngagements, regenerate, removeDead, resolveAttacks, type Death, type Hit } from './Combat';
@@ -12,7 +12,7 @@ import { allWarriors, nearestCluster, splitArmy, totalSoldiers, updatePlayerArmy
 import { applyGreenShards, applySoulShards, createPlayerResources } from './PlayerResources';
 import { createRng, type Rng } from './Random';
 import { SoulShardField, type SoulShard } from './SoulShards';
-import type { Vec2 } from './Types';
+import type { Rect, Vec2 } from './Types';
 
 /**
  * The whole game state and rules for one match, independent of Phaser:
@@ -23,6 +23,9 @@ import type { Vec2 } from './Types';
 
 type Config = typeof GameConfigType;
 
+/** The dark canopy at the map edge is always at least this many tiles deep (see buildGround). */
+const MIN_CANOPY_TILES = 2;
+
 export interface WorldEvents {
     shardsCollected: SoulShard[];
     shardsRespawned: SoulShard[];
@@ -32,6 +35,8 @@ export interface WorldEvents {
     summoned: { warrior: Warrior; owner: Player }[];
     splits: Vec2[];
     merges: Vec2[];
+    /** Soldiers that left their army and turned neutral this frame. */
+    surrendered: { warrior: Warrior; neutral: NeutralWarrior }[];
     hits: Hit[];
     deaths: Death[];
     eliminated: Player[];
@@ -74,12 +79,20 @@ export class World
     readonly players: Player[] = [];
     readonly human: Player;
     readonly nextUnitId: () => number;
+    /**
+     * Where armies can walk: right up to the dark forest canopy at the map edge
+     * (drawn 2-4 tiles deep), so they can touch the visible edge. Wider than
+     * `layout.playArea`, which still decides where things spawn.
+     */
+    readonly moveBounds: Rect;
     private readonly rng: Rng;
 
     constructor (private readonly config: Config, options: WorldOptions = {}, botColors: readonly string[] = [])
     {
         this.layout = generateBattlefield(config.world);
         this.obstacles = new ObstacleMap(this.layout.obstacles, this.layout.water, config.water.slowdown);
+        const edge = MIN_CANOPY_TILES * this.layout.tileSize;
+        this.moveBounds = { x: edge, y: edge, width: this.layout.worldWidth - edge * 2, height: this.layout.worldHeight - edge * 2 };
         this.nextUnitId = createIdSource();
         this.rng = createRng((options.seed ?? config.world.seed) + 7);
         this.shards = new SoulShardField(this.layout, config.soulShards, config.world.seed + 1);
@@ -134,13 +147,15 @@ export class World
      * Advance the world by one frame.
      * @param humanInput WASD direction for the human player.
      * @param humanSplit True on the frame SPACE was pressed.
+     * @param humanSurrenderAim On the frame the human surrenders a soldier: the
+     *   direction to send it (toward the mouse). Null otherwise.
      */
-    update (now: number, dt: number, humanInput: Vec2, humanSplit: boolean): WorldEvents
+    update (now: number, dt: number, humanInput: Vec2, humanSplit: boolean, humanSurrenderAim: Vec2 | null = null): WorldEvents
     {
         const c = this.config;
         const events: WorldEvents = {
             shardsCollected: [], shardsRespawned: [], neutralsRecruited: [], neutralsRespawned: [], summoned: [],
-            splits: [], merges: [], hits: [], deaths: [], eliminated: [], respawned: [],
+            splits: [], merges: [], surrendered: [], hits: [], deaths: [], eliminated: [], respawned: [],
             bodiesFallen: [], bodiesAwakened: [], bodiesRevived: [], bodiesExpired: [], lavaBurns: [],
         };
 
@@ -171,10 +186,15 @@ export class World
         {
             let input = humanInput;
             if (p.kind === 'bot') input = botInput(p, botView, now, c.bots);
-            else if (humanSplit) events.splits.push(...(splitArmy(p.army, now, this.obstacles, this.layout.playArea, c.army) ?? []));
+            else if (humanSplit) events.splits.push(...(splitArmy(p.army, now, this.obstacles, this.moveBounds, c.army) ?? []));
 
-            const { merges } = updatePlayerArmy(p.army, input, dt, now, this.obstacles, this.layout.playArea, c.army, c.movement);
+            const { merges } = updatePlayerArmy(p.army, input, dt, now, this.obstacles, this.moveBounds, c.army, c.movement);
             events.merges.push(...(p === this.human ? merges : []));
+        }
+        if (humanSurrenderAim && this.isAlive(this.human))
+        {
+            const released = this.surrender(this.human, humanSurrenderAim, now);
+            if (released) events.surrendered.push(released);
         }
 
         // 4. Fighting: strikes, deaths, eliminations.
@@ -233,7 +253,7 @@ export class World
                 const joined = this.neutrals.recruitNear(soldier.position, Infinity, now);
                 for (const neutral of joined)
                 {
-                    const warrior = addWarrior(nearestCluster(p.army, neutral.position), this.nextUnitId(), neutral.position, c.combat.maxHp);
+                    const warrior = addWarrior(nearestCluster(p.army, neutral.position), this.nextUnitId(), neutral.position, this.maxHpOf(neutral.role), neutral.role);
                     events.neutralsRecruited.push({ neutral, warrior, owner: p });
                 }
             }
@@ -313,6 +333,40 @@ export class World
         const centre = cluster.center.position;
         const spot = findFreeSpotNear(this.obstacles, this.layout.playArea, centre, WARRIOR_BODY, 40) ?? centre;
         return addWarrior(cluster, this.nextUnitId(), spot, this.maxHpOf(role), role);
+    }
+
+    /**
+     * One soldier leaves the army: the one furthest out on the side the
+     * player is aiming at. It turns neutral and walks off in that direction.
+     * An army never gives up its last soldier.
+     */
+    private surrender (p: Player, aim: Vec2, now: number): { warrior: Warrior; neutral: NeutralWarrior } | null
+    {
+        if (totalSoldiers(p.army) <= 1) return null;
+        const length = Math.hypot(aim.x, aim.y);
+        const dir = length > 0.001 ? { x: aim.x / length, y: aim.y / length } : { ...p.army.lead.heading };
+
+        const from = p.army.lead.center.position;
+        let pick: { cluster: Cluster; warrior: Warrior } | null = null;
+        let best = -Infinity;
+        for (const { cluster } of p.army.clusters)
+        {
+            for (const w of cluster.warriors)
+            {
+                const ahead = (w.position.x - from.x) * dir.x + (w.position.y - from.y) * dir.y;
+                if (ahead > best) { best = ahead; pick = { cluster, warrior: w }; }
+            }
+        }
+        if (!pick) return null;
+
+        const { cluster, warrior } = pick;
+        cluster.warriors = cluster.warriors.filter((w) => w !== warrior);
+        const reach = this.config.neutrals.surrender.releaseDistance;
+        const wanted = { x: warrior.position.x + dir.x * reach, y: warrior.position.y + dir.y * reach };
+        const destination = findFreeSpotNear(this.obstacles, this.moveBounds, wanted, WARRIOR_BODY, 30) ?? { ...warrior.position };
+        const neutral = this.neutrals.addSurrendered(warrior.position, destination, warrior.role, now + this.config.fallen.dormantMs, this.obstacles);
+        neutral.facing = dir.x < 0 ? -1 : 1;
+        return { warrior, neutral };
     }
 
     private maxHpOf (role: SoldierRole): number

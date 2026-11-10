@@ -251,6 +251,16 @@ export class ArmyView
     }
 
     /** A soldier died: it sinks and fades away. */
+    /** A soldier left the army alive (surrendered): its neutral sprite takes over on the spot. */
+    release (warrior: Warrior): void
+    {
+        const sprites = this.sprites.get(warrior.id);
+        if (!sprites) return;
+        this.sprites.delete(warrior.id);
+        sprites.body.destroy();
+        sprites.shadow.destroy();
+    }
+
     remove (warrior: Warrior): void
     {
         const sprites = this.sprites.get(warrior.id);
@@ -455,6 +465,9 @@ export class ArmyMarkers
     }
 }
 
+/** How see-through a surrendered soldier looks while nobody can recruit it yet. */
+const SURRENDER_WAIT_ALPHA = 0.45;
+
 /** Neutral Warriors waiting to be recruited. Keyed by site, since sites refill. */
 export class NeutralView
 {
@@ -471,11 +484,24 @@ export class NeutralView
         }
     }
 
-    /** Hide a neutral that just joined an army. */
+    /** A soldier that just surrendered: it appears as a plain neutral, faded until it can be recruited. */
+    add (unit: NeutralWarrior): void
+    {
+        const sprites = createUnitSprites(this.scene, Tex.NeutralWarrior, unit.position.x, unit.position.y);
+        this.sprites.set(unit.siteId, sprites);
+        sprites.body.setAlpha(SURRENDER_WAIT_ALPHA);
+        playJoinEffect(this.scene, unit.position.x, unit.position.y, Palette.stone.light);
+    }
+
+    /** Hide a neutral that just joined an army (a surrendered one is gone for good). */
     recruited (unit: NeutralWarrior): void
     {
         const sprites = this.sprites.get(unit.siteId);
-        if (sprites) this.setVisible(sprites, false);
+        if (!sprites) return;
+        if (unit.kind !== 'surrendered') { this.setVisible(sprites, false); return; }
+        this.sprites.delete(unit.siteId);
+        sprites.body.destroy();
+        sprites.shadow.destroy();
     }
 
     /** Fade a neutral back in when its site refills. */
@@ -494,7 +520,10 @@ export class NeutralView
         {
             if (!unit.available) continue;
             const sprites = this.sprites.get(unit.siteId);
-            if (sprites) syncUnit(sprites, unit.position.x, unit.position.y, unit.facing, unit.isMoving, time, unit.siteId);
+            if (!sprites) continue;
+            syncUnit(sprites, unit.position.x, unit.position.y, unit.facing, unit.isMoving, time, unit.siteId);
+            // A surrendered soldier fades in fully the moment it can be recruited.
+            if (unit.recruitableAt > 0) sprites.body.setAlpha(time < unit.recruitableAt ? SURRENDER_WAIT_ALPHA : 1);
         }
     }
 

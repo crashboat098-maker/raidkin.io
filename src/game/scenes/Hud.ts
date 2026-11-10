@@ -213,6 +213,10 @@ export class Hud extends Scene
         this.add.bitmapText(width - PADDING_X, TEXT_Y, PIXEL_FONT, 'RAIDKIN.IO')
             .setOrigin(1, 0).setScale(TEXT_SCALE).setTint(COLORS.title).setAlpha(0.6);
 
+        // Controls reminder, quietly in the bottom-left corner.
+        this.add.bitmapText(PADDING_X, this.scale.height - 12, PIXEL_FONT, 'SPACE SPLIT  -  Q / RIGHT-CLICK SURRENDER A SOLDIER')
+            .setOrigin(0, 1).setScale(TEXT_SCALE).setTint(COLORS.label).setAlpha(0.7);
+
         this.createLeaderboard(width);
         this.refresh();
         this.refreshLeaderboard();

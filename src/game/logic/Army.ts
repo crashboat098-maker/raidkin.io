@@ -352,6 +352,18 @@ export function updateCluster (
         let desiredX = goalDistance > 0.01 ? (toGoalX / goalDistance) * speed : 0;
         let desiredY = goalDistance > 0.01 ? (toGoalY / goalDistance) * speed : 0;
 
+        // Holding formation: move WITH the centre, plus a correction toward the
+        // spot. Without this, soldiers only chase where their spot is, trail
+        // behind it, and keep sliding the old way when the army turns.
+        if (arriving && !engaged)
+        {
+            desiredX += cluster.center.velocity.x;
+            desiredY += cluster.center.velocity.y;
+            const cap = topSpeed * settings.catchUpMultiplier;
+            const desiredSpeed = Math.hypot(desiredX, desiredY);
+            if (desiredSpeed > cap) { desiredX *= cap / desiredSpeed; desiredY *= cap / desiredSpeed; }
+        }
+
         // 4. Personal space: push away from very close neighbours.
         //    Much weaker while travelling, so Warriors can pass gaps in single file.
         const push = separation(warrior, useGrid ? null : cluster.warriors, settings.separationDistance);
