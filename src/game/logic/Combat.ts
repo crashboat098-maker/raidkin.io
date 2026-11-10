@@ -1,4 +1,4 @@
-import { centroid, clusterRadius, distance, type Warrior } from './Army';
+import { centroid, distance, formationSlots, type Warrior } from './Army';
 import type { Player } from './Player';
 import { allWarriors } from './PlayerArmy';
 import type { Rng } from './Random';
@@ -118,6 +118,10 @@ function soldierGrid (player: Player): SpatialGrid<Warrior>
 }
 
 const GRID_CELL = 32;
+/** A cluster centre moving faster than this (px/s) counts as "on the move". */
+const MOVING_SPEED = 20;
+/** Same spacing the army formation uses (GameConfig.army.formationSpacing). */
+const FORMATION_SPACING = 13;
 
 export function assignEngagements (players: readonly Player[], settings: CombatSettings, holdBack: (p: Player) => boolean): void
 {
@@ -135,18 +139,32 @@ export function assignEngagements (players: readonly Player[], settings: CombatS
         {
             if (holdBack(mine.player)) continue;
             const enemies = gridOf(theirs.player);
+            // While the army is on the move (its player-steered lead), nobody
+            // turns back to chase an enemy behind them: running away really
+            // runs away. Soldiers still close in on enemies ahead, and still
+            // strike anyone already in reach.
+            const vx = mine.player.army.lead.center.velocity.x;
+            const vy = mine.player.army.lead.center.velocity.y;
+            const moving = Math.hypot(vx, vy) > MOVING_SPEED;
             for (const { cluster } of mine.player.army.clusters)
             {
-                const reach = clusterRadius(cluster.warriors.length, 13) + settings.engageLeash;
                 const centre = cluster.center.position;
+                const slots = formationSlots(FORMATION_SPACING, Math.max(30, cluster.warriors.length));
                 for (const w of cluster.warriors)
                 {
                     if (w.role === 'archer') continue; // Archers hold their place and shoot
+                    // Each soldier only steps a short way out of its own spot in the
+                    // formation to fight (not out to a shared circle around the army,
+                    // which made fights form along an invisible line).
+                    const slot = slots[w.slot] ?? { x: 0, y: 0 };
+                    const homeX = centre.x + slot.x;
+                    const homeY = centre.y + slot.y;
                     let bestDistance = best.get(w) ?? settings.engageRadius;
                     enemies.forEachNear(w.position, settings.engageRadius, (e) => {
                         const d = distance(w.position, e.position);
                         if (d >= bestDistance) return;
-                        if (distance(e.position, centre) > reach) return;
+                        if (Math.hypot(e.position.x - homeX, e.position.y - homeY) > settings.engageLeash) return;
+                        if (moving && (e.position.x - w.position.x) * vx + (e.position.y - w.position.y) * vy < 0) return;
                         bestDistance = d;
                         w.engage = e.position;
                         best.set(w, d);

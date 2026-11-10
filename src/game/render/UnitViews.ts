@@ -8,6 +8,7 @@ import { Depth } from './BattlefieldView';
 import { hexToInt, Palette, type ArmyColor } from './Palette';
 import { PIXEL_FONT } from './PixelFont';
 import { Tex } from './PlaceholderArt';
+import { onView, type ViewRect } from './SoulShardView';
 
 /**
  * Draws Warriors (every army's) and neutral Warriors.
@@ -485,12 +486,12 @@ export class NeutralView
     }
 
     /** A soldier that just surrendered: it appears as a plain neutral, faded until it can be recruited. */
-    add (unit: NeutralWarrior): void
+    add (unit: NeutralWarrior, effect = true): void
     {
         const sprites = createUnitSprites(this.scene, Tex.NeutralWarrior, unit.position.x, unit.position.y);
         this.sprites.set(unit.siteId, sprites);
         sprites.body.setAlpha(SURRENDER_WAIT_ALPHA);
-        playJoinEffect(this.scene, unit.position.x, unit.position.y, Palette.stone.light);
+        if (effect) playJoinEffect(this.scene, unit.position.x, unit.position.y, Palette.stone.light);
     }
 
     /** Hide a neutral that just joined an army (a surrendered one is gone for good). */
@@ -514,13 +515,17 @@ export class NeutralView
         this.scene.tweens.add({ targets: sprites.body, alpha: 1, duration: 800 });
     }
 
-    sync (units: readonly NeutralWarrior[], time: number): void
+    sync (units: readonly NeutralWarrior[], time: number, view?: ViewRect): void
     {
         for (const unit of units)
         {
             if (!unit.available) continue;
             const sprites = this.sprites.get(unit.siteId);
             if (!sprites) continue;
+            // Off-screen neutrals aren't drawn.
+            const onScreen = !view || onView(view, unit.position.x, unit.position.y);
+            if (sprites.body.visible !== onScreen) this.setVisible(sprites, onScreen);
+            if (!onScreen) continue;
             syncUnit(sprites, unit.position.x, unit.position.y, unit.facing, unit.isMoving, time, unit.siteId);
             // A surrendered soldier fades in fully the moment it can be recruited.
             if (unit.recruitableAt > 0) sprites.body.setAlpha(time < unit.recruitableAt ? SURRENDER_WAIT_ALPHA : 1);

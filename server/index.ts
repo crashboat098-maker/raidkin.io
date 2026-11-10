@@ -52,7 +52,16 @@ const STATIC_DIR = resolve(here, '..', '..', 'dist');
 // The shared battlefield
 // ---------------------------------------------------------------------------
 
-const world = new World(GameConfig, { localHuman: false }, BOT_COLORS);
+/**
+ * The match only runs while someone is playing. When the last person leaves it
+ * stops; the next person to join gets a brand new match (fresh map state, and
+ * every bot back to one soldier with no kills or shards).
+ */
+let world = newWorld();
+function newWorld (): World
+{
+    return new World(GameConfig, { localHuman: false }, BOT_COLORS);
+}
 const started = performance.now();
 const clock = () => performance.now() - started;
 
@@ -112,6 +121,8 @@ function step (): void
     const now = clock();
     const dt = Math.min(0.05, (now - lastTickAt) / 1000);
     lastTickAt = now;
+    // Nobody playing: the match is switched off (no bots fighting to an empty room).
+    if (playingCount() === 0) return;
 
     const commands = new Map<Player, PlayerCommand>();
     for (const c of clients) if (c.player) commands.set(c.player, c.command);
@@ -175,6 +186,13 @@ function joinGame (client: Client, name: unknown, color: unknown): void
     const cleanName = sanitizeName(typeof name === 'string' ? name.toUpperCase() : '') || 'RAIDER';
     const cleanColor = ARMY_COLORS.includes(color as ArmyColor) ? (color as ArmyColor) : 'crimson';
     const now = clock();
+    // First one in after the match was switched off: start a fresh match.
+    if (playingCount() === 0)
+    {
+        world = newWorld();
+        pending = emptyEvents();
+        console.log('First player joined: new match started');
+    }
     client.player = world.addHuman(cleanName, cleanColor, now);
     client.command = { move: { x: 0, y: 0 }, split: null, surrender: null };
 
@@ -188,8 +206,10 @@ function joinGame (client: Client, name: unknown, color: unknown): void
 function leave (client: Client): void
 {
     if (!client.player) return;
-    world.removePlayer(client.player);
+    // The army stays behind as neutrals anyone can collect.
+    for (const r of world.removePlayer(client.player, clock())) pending.surrendered.push(r.warrior.id, r.neutral.siteId);
     client.player = null;
+    if (playingCount() === 0) console.log('Last player left: match switched off');
     broadcastLobby();
 }
 

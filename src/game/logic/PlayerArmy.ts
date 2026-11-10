@@ -384,16 +384,30 @@ function clusterTargets (army: PlayerArmy, plan: RegroupPlan, obstacles: Obstacl
 {
     const targets = new Map<ArmyCluster, Vec2>();
     const lead = army.lead.center.position;
-    const holding = [...plan.holding].sort((a, b) => a.cluster.id - b.cluster.id);
-
-    if (holding.length > 0)
+    // Spots for EVERY cluster, returning ones included, so the layout doesn't
+    // shift when one heads back (otherwise the groups that stay would slide
+    // toward the middle to meet it).
+    const placed = [...army.clusters].sort((a, b) => a.cluster.id - b.cluster.id);
+    const spots = new Map<ArmyCluster, Vec2>();
+    if (placed.length > 0)
     {
-        const biggest = Math.max(...holding.map((c) => clusterRadius(c.cluster.warriors.length, settings.formationSpacing)));
-        const offsets = clusterOffsets(holding.length, biggest * 2 + settings.split.clusterGap);
-        holding.forEach((ac, i) => targets.set(ac, freeTowardLead(lead, offsets[i], obstacles, bounds)));
+        const biggest = Math.max(...placed.map((c) => clusterRadius(c.cluster.warriors.length, settings.formationSpacing)));
+        const offsets = clusterOffsets(placed.length, biggest * 2 + settings.split.clusterGap);
+        placed.forEach((ac, i) => spots.set(ac, freeTowardLead(lead, offsets[i], obstacles, bounds)));
     }
 
-    for (const [ac, parent] of plan.returning) targets.set(ac, parent.cluster.center.position);
+    for (const ac of plan.holding) targets.set(ac, spots.get(ac) ?? lead);
+
+    // Regrouping: the smaller group runs back to the bigger one, which holds its spot.
+    for (const [ac, parent] of plan.returning)
+    {
+        if (ac.cluster.warriors.length <= parent.cluster.warriors.length) targets.set(ac, parent.cluster.center.position);
+        else
+        {
+            targets.set(ac, spots.get(ac) ?? lead);
+            targets.set(parent, ac.cluster.center.position);
+        }
+    }
 
     return targets;
 }
@@ -648,10 +662,28 @@ function mergeReturning (army: PlayerArmy, plan: RegroupPlan, settings: PlayerAr
             x: (parent.cluster.center.position.x + child.cluster.center.position.x) / 2,
             y: (parent.cluster.center.position.y + child.cluster.center.position.y) / 2,
         });
+        // The merged army forms up where the bigger group stands.
+        if (child.cluster.warriors.length > parent.cluster.warriors.length)
+        {
+            const from = child.cluster.center;
+            const to = parent.cluster.center;
+            to.position.x = from.position.x;
+            to.position.y = from.position.y;
+            to.velocity.x = from.velocity.x;
+            to.velocity.y = from.velocity.y;
+        }
         parent.cluster.warriors.push(...child.cluster.warriors);
         child.cluster.warriors = [];
         army.clusters = army.clusters.filter((c) => c !== child);
         reassignSlots(parent.cluster, settings.formationSpacing);
+    }
+    // Back together as one: the steering point moves to the army (not the army to it).
+    if (merges.length > 0 && army.clusters.length === 1)
+    {
+        const lead = army.lead.center.position;
+        const at = army.clusters[0].cluster.center.position;
+        lead.x = at.x;
+        lead.y = at.y;
     }
     return merges;
 }

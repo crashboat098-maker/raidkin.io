@@ -5,7 +5,7 @@ import { NatureTex } from '../render/NatureArt';
 import { ARMY_COLORS, hexToInt, Palette, type ArmyColor } from '../render/Palette';
 import { ensurePixelFont, PIXEL_FONT } from '../render/PixelFont';
 import { createPlaceholderTextures, Tex } from '../render/PlaceholderArt';
-import { BUTTON_PRIMARY, drawStonePanel, PixelButton } from '../render/UiKit';
+import { BUTTON_PRIMARY, PixelButton } from '../render/UiKit';
 import { netClient } from '../net/NetClient';
 import { isNameChar, loadSettings, NAME_MAX_LENGTH, sanitizeName, saveSettings, type PlayerSettings } from './PlayerSettings';
 
@@ -16,19 +16,43 @@ import { isNameChar, loadSettings, NAME_MAX_LENGTH, sanitizeName, saveSettings, 
 
 const W = 1280;
 const H = 720;
-const PANEL = { x: 230, y: 196, w: 820, h: 452 };
-const LEFT = PANEL.x + 44;
-const INPUT = { x: LEFT, y: 262, w: 440, h: 48 };
-const SWATCH = { x: LEFT, y: 370, size: 60, gap: 16 };
-const PREVIEW = { x: PANEL.x + PANEL.w - 170, y: 470 };
+/** One centred card holds everything (title, name, colours, play, preview). */
+const CARD = { x: 250, y: 22, w: 780, h: 676, radius: 18 };
+const LEFT = CARD.x + 44;
+const INPUT = { x: LEFT, y: 232, w: 440, h: 52 };
+/** Colour swatches: a 4 x 3 grid. */
+const SWATCH = { x: LEFT, y: 342, w: 98, h: 46, gapX: 16, gapY: 16, cols: 4 };
+const PREVIEW = { x: CARD.x + CARD.w - 150, y: 470 };
 
 const TEXT = {
-    label: 0x8fa39a,
-    value: 0xe8e2d4,
-    title: 0xefe6d2,
+    label: 0x9fb8a6,
+    value: 0x1a2118,
+    title: hexToInt('#ffd36a'),
+    tagline: 0xe8efe4,
     dim: 0x9aa79f,
-    selected: hexToInt(Palette.accent.amber),
+    status: hexToInt('#ffd36a'),
 };
+const CARD_FILL = 0x1d3a26;
+const CARD_EDGE = hexToInt('#e0b04a');
+const INPUT_FILL = 0xf3fbef;
+
+/** Top-left corner of colour swatch `i`. */
+function swatchAt (i: number): { x: number; y: number }
+{
+    const col = i % SWATCH.cols;
+    const row = Math.floor(i / SWATCH.cols);
+    return { x: SWATCH.x + col * (SWATCH.w + SWATCH.gapX), y: SWATCH.y + row * (SWATCH.h + SWATCH.gapY) };
+}
+
+/** Light colours get a dark check mark, dark ones a white one. */
+function isLight (hex: string): boolean
+{
+    const n = hexToInt(hex);
+    const r = (n >> 16) & 255;
+    const g = (n >> 8) & 255;
+    const b = n & 255;
+    return 0.299 * r + 0.587 * g + 0.114 * b > 150;
+}
 
 export class Start extends Scene
 {
@@ -58,49 +82,54 @@ export class Start extends Scene
         this.typedName = this.settings.name;
 
         this.drawBackdrop();
+
+        // --- The card ---
+        const g = this.add.graphics();
+        g.fillStyle(0x000000, 0.35).fillRoundedRect(CARD.x + 6, CARD.y + 8, CARD.w, CARD.h, CARD.radius); // drop shadow
+        g.fillStyle(CARD_FILL, 0.97).fillRoundedRect(CARD.x, CARD.y, CARD.w, CARD.h, CARD.radius);
+        g.lineStyle(4, CARD_EDGE, 1).strokeRoundedRect(CARD.x, CARD.y, CARD.w, CARD.h, CARD.radius);
         this.drawTitle();
 
-        const g = this.add.graphics();
-        drawStonePanel(g, PANEL.x, PANEL.y, PANEL.w, PANEL.h);
-
         // --- Army name ---
-        this.label(LEFT, 232, 'ARMY NAME');
-        g.fillStyle(hexToInt(Palette.outline), 1).fillRect(INPUT.x - 2, INPUT.y - 2, INPUT.w + 4, INPUT.h + 4);
-        g.fillStyle(0x0b0e0a, 1).fillRect(INPUT.x, INPUT.y, INPUT.w, INPUT.h);
-        g.fillStyle(hexToInt(Palette.stone.dark), 1).fillRect(INPUT.x, INPUT.y + INPUT.h - 3, INPUT.w, 3);
-        this.nameText = this.add.bitmapText(INPUT.x + 14, INPUT.y + 13, PIXEL_FONT, '').setScale(3).setTint(TEXT.value);
-        this.counterText = this.add.bitmapText(INPUT.x + INPUT.w, INPUT.y + INPUT.h + 10, PIXEL_FONT, '').setOrigin(1, 0).setScale(2).setTint(TEXT.dim);
+        this.label(LEFT, 208, 'ARMY NAME');
+        g.fillStyle(INPUT_FILL, 1).fillRoundedRect(INPUT.x, INPUT.y, INPUT.w, INPUT.h, 8);
+        g.lineStyle(2, 0x9fb8a6, 1).strokeRoundedRect(INPUT.x, INPUT.y, INPUT.w, INPUT.h, 8);
+        this.nameText = this.add.bitmapText(INPUT.x + 16, INPUT.y + 15, PIXEL_FONT, '').setScale(3).setTint(TEXT.value);
+        this.counterText = this.add.bitmapText(INPUT.x + INPUT.w, INPUT.y + INPUT.h + 8, PIXEL_FONT, '').setOrigin(1, 0).setScale(2).setTint(TEXT.dim);
 
-        // --- Army colour ---
-        this.label(LEFT, 340, 'ARMY COLOUR');
-        this.swatchFrames = this.add.graphics();
+        // --- Army colour: flat swatches in a 4 x 3 grid, a check on the chosen one ---
+        this.label(LEFT, 318, 'ARMY COLOUR');
         ARMY_COLORS.forEach((color, i) => {
-            const x = SWATCH.x + i * (SWATCH.size + SWATCH.gap);
-            const box = this.add.graphics();
-            box.fillStyle(hexToInt(Palette.outline), 1).fillRect(x, SWATCH.y, SWATCH.size, SWATCH.size);
-            box.fillStyle(hexToInt(Palette.armies[color].dark), 1).fillRect(x + 3, SWATCH.y + 3, SWATCH.size - 6, SWATCH.size - 6);
-            box.fillStyle(hexToInt(Palette.armies[color].main), 1).fillRect(x + 3, SWATCH.y + 3, SWATCH.size - 6, (SWATCH.size - 6) / 2);
-            this.add.image(x + SWATCH.size / 2, SWATCH.y + SWATCH.size - 6, Tex.warrior(color)).setOrigin(0.5, 1).setScale(3);
-            this.add.zone(x, SWATCH.y, SWATCH.size, SWATCH.size).setOrigin(0, 0)
+            const { x, y } = swatchAt(i);
+            const colors = Palette.armies[color];
+            g.fillStyle(hexToInt(colors.dark), 1).fillRoundedRect(x, y, SWATCH.w, SWATCH.h, 7);
+            g.fillStyle(hexToInt(colors.main), 1).fillRoundedRect(x, y, SWATCH.w, SWATCH.h - 4, 7);
+            this.add.zone(x, y, SWATCH.w, SWATCH.h).setOrigin(0, 0)
                 .setInteractive({ useHandCursor: true })
                 .on('pointerdown', () => this.selectColor(color));
         });
-        this.colorNameText = this.add.bitmapText(LEFT, SWATCH.y + SWATCH.size + 16, PIXEL_FONT, '').setScale(2);
+        this.swatchFrames = this.add.graphics();
+        const lastSwatch = swatchAt(ARMY_COLORS.length - 1);
+        this.colorNameText = this.add.bitmapText(LEFT, lastSwatch.y + SWATCH.h + 16, PIXEL_FONT, '').setScale(2);
 
-        // --- Start ---
-        const startButton = new PixelButton(this, LEFT, 522, 440, 70, 'START GAME', 4, BUTTON_PRIMARY, () => this.startGame());
+        // --- Play ---
+        const startButton = new PixelButton(this, LEFT, 566, INPUT.w, 66, 'PLAY', 4, BUTTON_PRIMARY, () => this.startGame());
 
         // Online or practice? (Updated while this screen is open.) A notice from a
-        // dropped match shows first, in amber.
+        // dropped match shows first, in red-orange.
         const notice = (data as { notice?: string } | undefined)?.notice ?? null;
-        const status = this.add.bitmapText(LEFT + 220, 604, PIXEL_FONT, '').setOrigin(0.5, 0).setScale(2);
+        const status = this.add.bitmapText(W / 2, 170, PIXEL_FONT, '').setOrigin(0.5, 0).setScale(2);
         const noticeUntil = this.time.now + 10_000;
         const showStatus = () => {
-            if (notice && this.time.now < noticeUntil) { status.setText(notice).setTint(hexToInt(Palette.accent.amber)); return; }
+            if (notice && this.time.now < noticeUntil) { status.setText(notice).setTint(hexToInt(Palette.flame[0])); return; }
             const lobby = netClient.lobby;
-            if (netClient.online && lobby) status.setText(lobby.full ? 'SERVER FULL - PRACTICE VS BOTS' : `ONLINE - ${lobby.playing} PLAYING`).setTint(TEXT.value);
+            if (netClient.online && lobby)
+            {
+                const here = `${lobby.online} ${lobby.online === 1 ? 'PERSON' : 'PEOPLE'} HERE - ${lobby.playing} PLAYING`;
+                status.setText(lobby.full ? 'SERVER FULL - PRACTICE VS BOTS' : here).setTint(TEXT.status);
+            }
             else if (netClient.configured) status.setText('CONNECTING - OR PRACTICE VS BOTS').setTint(TEXT.dim);
-            else status.setText('PRACTICE VS BOTS').setTint(TEXT.dim);
+            else status.setText('PRACTICE VS BOTS').setTint(TEXT.status);
         };
         showStatus();
         this.time.addEvent({ delay: 500, loop: true, callback: showStatus });
@@ -110,10 +139,10 @@ export class Start extends Scene
         this.previewBanner = this.add.image(PREVIEW.x - 52, PREVIEW.y + 10, Tex.banner(this.settings.color)).setOrigin(0.15, 1).setScale(5);
         this.previewWarrior = this.add.image(PREVIEW.x + 8, PREVIEW.y + 10, Tex.warrior(this.settings.color)).setOrigin(0.5, 1).setScale(8);
         this.previewName = this.add.bitmapText(PREVIEW.x - 10, PREVIEW.y + 42, PIXEL_FONT, '').setOrigin(0.5, 0).setScale(2);
-        this.label(PREVIEW.x - 10, 232, 'PREVIEW', 0.5);
+        this.label(PREVIEW.x - 10, 208, 'PREVIEW', 0.5);
 
         // --- Hint ---
-        this.add.bitmapText(W / 2, H - 40, PIXEL_FONT, "TYPE A NAME  -  < > OR CLICK FOR COLOUR  -  ENTER TO START")
+        this.add.bitmapText(W / 2, CARD.y + CARD.h - 40, PIXEL_FONT, 'TYPE A NAME - ARROWS FOR COLOUR - ENTER TO PLAY')
             .setOrigin(0.5, 0).setScale(2).setTint(TEXT.dim);
 
         // Keyboard: type the name, arrows for colour, Enter to start.
@@ -168,11 +197,18 @@ export class Start extends Scene
         this.previewBanner.setTexture(Tex.banner(color));
         this.previewName.setText(this.typedName.trim() || 'NAME YOUR ARMY').setTint(this.typedName.trim() ? hexToInt(colors.main) : TEXT.dim);
 
-        // Highlight the selected swatch.
+        // Highlight the selected swatch: a white frame and a check mark.
         const g = this.swatchFrames.clear();
-        const i = ARMY_COLORS.indexOf(color);
-        const x = SWATCH.x + i * (SWATCH.size + SWATCH.gap);
-        g.lineStyle(4, TEXT.selected, 1).strokeRect(x - 5, SWATCH.y - 5, SWATCH.size + 10, SWATCH.size + 10);
+        const { x, y } = swatchAt(ARMY_COLORS.indexOf(color));
+        g.lineStyle(4, 0xffffff, 1).strokeRoundedRect(x - 4, y - 4, SWATCH.w + 8, SWATCH.h + 8, 9);
+        const cx = x + SWATCH.w / 2;
+        const cy = y + SWATCH.h / 2 - 2;
+        g.lineStyle(5, isLight(colors.main) ? 0x1a2118 : 0xffffff, 1);
+        g.beginPath();
+        g.moveTo(cx - 11, cy);
+        g.lineTo(cx - 3, cy + 8);
+        g.lineTo(cx + 12, cy - 8);
+        g.strokePath();
     }
 
     private label (x: number, y: number, text: string, originX = 0): void
@@ -208,12 +244,10 @@ export class Start extends Scene
 
     private drawTitle (): void
     {
-        const scale = 9;
-        const charWidth = 7 * scale;
-        const left = W / 2 - (10 * charWidth) / 2;
-        this.add.bitmapText(left, 44, PIXEL_FONT, 'RAIDKIN').setScale(scale).setTint(TEXT.title);
-        this.add.bitmapText(left + 7 * charWidth, 44, PIXEL_FONT, '.IO').setScale(scale).setTint(hexToInt(Palette.accent.amber));
-        this.add.bitmapText(W / 2, 140, PIXEL_FONT, 'RAISE AN ARMY. CRUSH YOUR RIVALS. RULE THE BATTLEFIELD.')
-            .setOrigin(0.5, 0).setScale(2).setTint(TEXT.dim);
+        this.add.bitmapText(W / 2, CARD.y + 22, PIXEL_FONT, 'RAIDKIN.IO').setOrigin(0.5, 0).setScale(7).setTint(TEXT.title);
+        this.add.bitmapText(W / 2, CARD.y + 100, PIXEL_FONT, 'START ALONE. BUILD AN ARMY. CONQUER.')
+            .setOrigin(0.5, 0).setScale(2).setTint(TEXT.tagline);
+        this.add.bitmapText(W / 2, CARD.y + 122, PIXEL_FONT, `COLLECT SOUL SHARDS - EVERY ${GameConfig.army.recruitCost} RECRUIT A WARRIOR.`)
+            .setOrigin(0.5, 0).setScale(2).setTint(TEXT.tagline);
     }
 }
