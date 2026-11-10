@@ -30,10 +30,15 @@ with **New > Web Service** instead):
 | Setting | Value |
 |---|---|
 | Runtime | Node |
-| Build command | `npm ci --include=dev && npm run build:online` |
+| Build command | `npm ci --include=dev && npm run build:online` (or simply `npm install && npm run build`) |
 | Start command | `npm start` |
+| Root directory | leave empty |
 | Health check path | `/healthz` |
 | Environment variable | `NODE_VERSION` = `22` |
+
+If a deploy fails with `Cannot find module .../server/dist/server.mjs`, the
+build command didn't build the server: open the service's **Settings**, set the
+build command above, and choose **Manual Deploy > Deploy latest commit**.
 
 Optional environment variables:
 

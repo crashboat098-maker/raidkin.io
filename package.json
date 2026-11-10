@@ -15,7 +15,7 @@
   "homepage": "https://github.com/phaserjs/template-vite-ts#readme",
   "scripts": {
     "dev": "node log.js dev & vite --config vite/config.dev.mjs",
-    "build": "node log.js build & vite build --config vite/config.prod.mjs",
+    "build": "npm run build:online",
     "dev-nolog": "vite --config vite/config.dev.mjs",
     "build-nolog": "vite build --config vite/config.prod.mjs",
     "build:server": "esbuild server/index.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=server/dist/server.mjs",
@@ -26,12 +26,12 @@
   "devDependencies": {
     "@types/node": "^22.20.5",
     "@types/ws": "^8.18.2",
-    "esbuild": "^0.25.2",
-    "typescript": "~5.7.2",
-    "vite": "^6.3.1"
+    "typescript": "~5.7.2"
   },
   "dependencies": {
+    "esbuild": "^0.25.2",
     "phaser": "4.0.0",
+    "vite": "^6.3.1",
     "terser": "^5.39.0",
     "ws": "^8.22.2"
   }
