@@ -1,0 +1,13 @@
+# Render Blueprint: one web service that serves the game page AND runs the
+# multiplayer server. In Render: New > Blueprint > pick this repository.
+services:
+  - type: web
+    name: raidkin-online
+    runtime: node
+    plan: free
+    buildCommand: npm ci --include=dev && npm run build:online
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "22"

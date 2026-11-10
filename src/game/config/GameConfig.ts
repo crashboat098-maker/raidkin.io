@@ -139,6 +139,13 @@ export const GameConfig = {
              * maxWaitForReturnMs extra), so merges cascade up into one army.
              */
             regroup: { minMs: 3000, perSoldierMs: 200, maxMs: 18_000, maxWaitForReturnMs: 8000 },
+            /**
+             * A split is aimed at the mouse: the front half of each cluster breaks
+             * off. Fresh clusters rush out to their place launchBoost times
+             * faster, for at most launchMs.
+             */
+            launchBoost: 1.5,
+            launchMs: 1000,
             /** Visible gap kept between neighbouring clusters' edges (world px). */
             clusterGap: 12,
             /** Cluster centres may move this much faster than the army to keep up / converge. */
@@ -199,6 +206,11 @@ export const GameConfig = {
          * shooting arrows at enemies within `range` from behind the front line.
          */
         archer: { maxHp: 60, damage: 11, range: 95, attackIntervalMs: 900 },
+        /**
+         * Split-off clusters hit softer when small: [cluster size, share of damage].
+         * 5 soldiers hit at half damage, 25 or more at full. The main cluster always hits at full.
+         */
+        clusterDamage: [[5, 0.5], [25, 1]] as const,
     },
 
     bots: {

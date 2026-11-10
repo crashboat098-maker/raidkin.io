@@ -8,7 +8,9 @@ import { isLava } from './LavaRivers';
 import { NeutralForces, type NeutralWarrior } from './Neutrals';
 import { ObstacleMap } from './Obstacles';
 import { createIdSource, createPlayer, createStartingArmy, type Player } from './Player';
-import { allWarriors, nearestCluster, splitArmy, totalSoldiers, updatePlayerArmy } from './PlayerArmy';
+import type { DefeatStats, GameWorld } from './GameWorld';
+import { finalRank } from './Leaderboard';
+import { allWarriors, nearestCluster, secondsUntilRegroup, splitArmy, totalSoldiers, updatePlayerArmy } from './PlayerArmy';
 import { applyGreenShards, applySoulShards, createPlayerResources } from './PlayerResources';
 import { createRng, type Rng } from './Random';
 import { SoulShardField, type SoulShard } from './SoulShards';
@@ -52,15 +54,42 @@ export interface WorldEvents {
     bodiesExpired: FallenBody[];
     /** Soldiers that took a lava burn this frame (each only for its own burn). */
     lavaBurns: Warrior[];
+
+    // Only from online play (NetWorld), where the server reports what happened:
+    /** Soldiers already there when you joined (shown without an effect). */
+    appeared?: { warrior: Warrior; owner: Player }[];
+    /** Soldiers that left without dying (their player left the game). */
+    vanished?: Warrior[];
+    /** Neutrals that just joined an army (their new soldier arrives separately). */
+    neutralsGone?: NeutralWarrior[];
+    /** Neutrals that appeared (a surrendered soldier whose release wasn't seen). */
+    neutralsAdded?: NeutralWarrior[];
 }
 
 const BOT_NAMES_START = ['Grim', 'Mor', 'Vel', 'Kar', 'Dra', 'Thal', 'Rav', 'Ash', 'Bryn', 'Sor', 'Ulf', 'Eld', 'Hal', 'Vor'];
 const BOT_NAMES_END = ['gar', 'wen', 'dric', 'mont', 'vash', 'thorn', 'ric', 'lyn', 'mar', 'dun', 'helm', 'wyn', 'grim', 'stead'];
 
+/** One frame of a human player's input. */
+export interface PlayerCommand {
+    /** Movement direction, each axis -1..1. */
+    move: Vec2;
+    /** Split this frame: the direction to split toward, or true for the army's heading. */
+    split: boolean | Vec2 | null;
+    /** Surrender a soldier this frame, sent in this direction. */
+    surrender: Vec2 | null;
+}
+
+const IDLE_COMMAND: PlayerCommand = { move: { x: 0, y: 0 }, split: null, surrender: null };
+
 export interface WorldOptions {
     /** The human's chosen army name and colour (from the start screen). */
     humanName?: string;
     humanColor?: string;
+    /**
+     * False on a game server: no local human takes part (`human` exists but is
+     * never in `players`); people join with `addHuman` instead. Default true.
+     */
+    localHuman?: boolean;
     /** Override the number of bots (tests). */
     bots?: number;
     /** Soldiers the human starts with (tests). */
@@ -68,7 +97,7 @@ export interface WorldOptions {
     seed?: number;
 }
 
-export class World
+export class World implements GameWorld
 {
     readonly layout: BattlefieldLayout;
     readonly obstacles: ObstacleMap;
@@ -103,7 +132,7 @@ export class World
             name: options.humanName ?? 'YOU', kind: 'human', colorId: options.humanColor ?? 'crimson', size: options.humanSize ?? 1,
             maxHp: config.combat.maxHp, obstacles: this.obstacles, bounds: this.layout.playArea,
         });
-        this.players.push(this.human);
+        if (options.localHuman !== false) this.players.push(this.human);
 
         const names = new Set<string>();
         const botCount = options.bots ?? config.bots.count;
@@ -122,6 +151,27 @@ export class World
             bot.bot = createBotState();
             this.players.push(bot);
         }
+    }
+
+    private nextHumanId = 1;
+
+    /** Someone joins (online) at time `now`: a new one-soldier army far from everyone else. */
+    addHuman (name: string, colorId: string, now: number): Player
+    {
+        const p = createPlayer(`h${this.nextHumanId++}`, this.findSpawnPoint(), this.nextUnitId, {
+            name, kind: 'human', colorId, size: 1,
+            maxHp: this.config.combat.maxHp, obstacles: this.obstacles, bounds: this.layout.playArea,
+        });
+        p.stats.startedAt = now;
+        this.players.push(p);
+        return p;
+    }
+
+    /** Someone left: their army disappears from the battlefield. */
+    removePlayer (p: Player): void
+    {
+        const index = this.players.indexOf(p);
+        if (index >= 0) this.players.splice(index, 1);
     }
 
     get bots (): Player[]
@@ -143,14 +193,39 @@ export class World
     /** When the match began (the first update). */
     matchStartedAt: number | null = null;
 
+    splitState (now: number): { clusters: number; regroupSeconds: number | null } | null
+    {
+        const army = this.human.army;
+        if (this.human.respawnAt !== null || army.clusters.length <= 1) return null;
+        return { clusters: army.clusters.length, regroupSeconds: secondsUntilRegroup(army, now, this.config.army) };
+    }
+
+    defeatStats (now: number): DefeatStats
+    {
+        const human = this.human;
+        return {
+            kills: human.kills,
+            largestArmy: human.stats.peakArmy,
+            shards: human.resources.soulShards,
+            survivalMs: (human.stats.defeatedAt ?? now) - (this.matchStartedAt ?? now),
+            rank: finalRank(human, this.players),
+            competitors: this.players.length,
+        };
+    }
+
     /**
      * Advance the world by one frame.
      * @param humanInput WASD direction for the human player.
-     * @param humanSplit True on the frame SPACE was pressed.
+     * @param humanSplit On the frame SPACE was pressed: the direction to split
+     *   toward (the mouse), or true for the way the army is heading.
      * @param humanSurrenderAim On the frame the human surrenders a soldier: the
      *   direction to send it (toward the mouse). Null otherwise.
+     * @param commands What every other human player (online) does this frame.
      */
-    update (now: number, dt: number, humanInput: Vec2, humanSplit: boolean, humanSurrenderAim: Vec2 | null = null): WorldEvents
+    update (
+        now: number, dt: number, humanInput: Vec2, humanSplit: boolean | Vec2 | null, humanSurrenderAim: Vec2 | null = null,
+        commands?: ReadonlyMap<Player, PlayerCommand>,
+    ): WorldEvents
     {
         const c = this.config;
         const events: WorldEvents = {
@@ -182,18 +257,31 @@ export class World
             players: living, shards: this.shards.shards, neutrals: this.neutrals.units, bodies: this.fallen.recruitable(),
             obstacles: this.obstacles, bounds: this.layout.playArea, rng: this.rng,
         };
+        const surrenders: [Player, Vec2][] = [];
         for (const p of living)
         {
-            let input = humanInput;
+            // The local human plays from the arguments; other humans (online) from `commands`.
+            const command: PlayerCommand = p === this.human
+                ? { move: humanInput, split: humanSplit, surrender: humanSurrenderAim }
+                : commands?.get(p) ?? IDLE_COMMAND;
+            let input = command.move;
             if (p.kind === 'bot') input = botInput(p, botView, now, c.bots);
-            else if (humanSplit) events.splits.push(...(splitArmy(p.army, now, this.obstacles, this.moveBounds, c.army) ?? []));
+            else
+            {
+                if (command.split)
+                {
+                    const aim = typeof command.split === 'object' ? command.split : null;
+                    events.splits.push(...(splitArmy(p.army, now, this.obstacles, this.moveBounds, c.army, aim) ?? []));
+                }
+                if (command.surrender) surrenders.push([p, command.surrender]);
+            }
 
             const { merges } = updatePlayerArmy(p.army, input, dt, now, this.obstacles, this.moveBounds, c.army, c.movement);
-            events.merges.push(...(p === this.human ? merges : []));
+            if (p.kind === 'human') events.merges.push(...merges);
         }
-        if (humanSurrenderAim && this.isAlive(this.human))
+        for (const [p, aim] of surrenders)
         {
-            const released = this.surrender(this.human, humanSurrenderAim, now);
+            const released = this.surrender(p, aim, now);
             if (released) events.surrendered.push(released);
         }
 

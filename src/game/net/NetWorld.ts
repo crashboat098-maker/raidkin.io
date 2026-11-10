@@ -1,0 +1,535 @@
+import type { GameConfig as GameConfigType } from '../config/GameConfig';
+import { createWarrior, type Warrior } from '../logic/Army';
+import { generateBattlefield, type BattlefieldLayout } from '../logic/BattlefieldLayout';
+import type { Death, Hit } from '../logic/Combat';
+import type { FallenBody } from '../logic/Fallen';
+import type { DefeatStats, GameWorld } from '../logic/GameWorld';
+import { NeutralForces, type NeutralWarrior } from '../logic/Neutrals';
+import { ObstacleMap } from '../logic/Obstacles';
+import { createIdSource, type Player } from '../logic/Player';
+import { createPlayerArmy } from '../logic/PlayerArmy';
+import { createPlayerResources } from '../logic/PlayerResources';
+import { SoulShardField, type SoulShard } from '../logic/SoulShards';
+import type { Vec2 } from '../logic/Types';
+import type { WorldEvents } from '../logic/World';
+import type { NetClient } from './NetClient';
+import {
+    JOIN_RECRUITED, NEUTRAL_AVAILABLE, NEUTRAL_FACING_LEFT, NEUTRAL_KINDS, NEUTRAL_MOVING, NEUTRAL_READY, PROTOCOL_VERSION,
+    WARRIOR_ARCHER, WARRIOR_BURNING, WARRIOR_FACING_LEFT, WARRIOR_MOVING,
+    type BodyRow, type DefeatMessage, type ServerMessage, type SnapshotMessage, type StateMessage, type YouRow,
+} from './Protocol';
+
+type Config = typeof GameConfigType;
+
+/**
+ * Online play: a mirror of the match running on the game server.
+ *
+ * The map is generated from the same seed as on the server, so only what
+ * moves or changes comes over the network. Snapshots arrive ~15 times a
+ * second; everything is drawn a little in the past (INTERPOLATION_MS) so it
+ * can glide smoothly between two snapshots. Each snapshot's events (hits,
+ * deaths, pickups...) are handed to the scene as the usual WorldEvents, at
+ * the moment that snapshot is reached, so effects line up with movement.
+ */
+
+const INTERPOLATION_MS = 110;
+/** Send steering at most this often (and at least this often while it changes). */
+const INPUT_INTERVAL_MS = 50;
+const INPUT_KEEPALIVE_MS = 400;
+
+interface Decoded {
+    time: number;
+    you: YouRow | null;
+    message: SnapshotMessage;
+    warriors: Map<number, { x: number; y: number }>;
+    leads: Map<string, { x: number; y: number }>;
+    neutrals: Map<number, { x: number; y: number }>;
+}
+
+interface Tracked {
+    warrior: Warrior;
+    owner: Player;
+    /** Position at the last applied snapshot. */
+    from: Vec2;
+}
+
+export class NetWorld implements GameWorld
+{
+    readonly layout: BattlefieldLayout;
+    readonly obstacles: ObstacleMap;
+    readonly players: Player[] = [];
+    human: Player;
+    readonly neutrals: { units: NeutralWarrior[] };
+    readonly shards: { shards: SoulShard[] };
+    matchStartedAt: number | null = null;
+    humanDefeated = false;
+    /** The connection dropped mid-match. */
+    disconnected = false;
+    /** Joined and given the starting state: ready to draw. */
+    ready = false;
+    /** The server turned us away. */
+    refused: 'version' | 'full' | null = null;
+
+    private myId: string | null = null;
+    private readonly playersById = new Map<string, Player>();
+    private readonly leadFrom = new Map<string, Vec2>();
+    private readonly warriors = new Map<number, Tracked>();
+    private readonly neutralsBySite = new Map<number, NeutralWarrior>();
+    private readonly neutralFrom = new Map<number, Vec2>();
+    private readonly bodies = new Map<number, FallenBody>();
+    private readonly pending: Decoded[] = [];
+    private applied: Decoded | null = null;
+    private clockOffset: number | null = null;
+    private you: YouRow | null = null;
+    private defeat: DefeatMessage | null = null;
+    private firstApply = true;
+    private lastInput: Vec2 = { x: 0, y: 0 };
+    private lastInputSentAt = 0;
+    /** Events gathered from messages that arrived between frames (state on joining). */
+    private queued: WorldEvents = emptyWorldEvents();
+
+    constructor (private readonly config: Config, private readonly net: NetClient, name: string, color: string)
+    {
+        this.layout = generateBattlefield(config.world);
+        this.obstacles = new ObstacleMap(this.layout.obstacles, this.layout.water, config.water.slowdown);
+        // Same seeds as the server, so shard ids and neutral sites line up with it.
+        this.shards = new SoulShardField(this.layout, config.soulShards, config.world.seed + 1);
+        const forces = new NeutralForces(this.layout, this.obstacles, config.neutrals, config.world.seed + 2, createIdSource());
+        this.neutrals = { units: forces.units };
+        for (const u of forces.units) this.neutralsBySite.set(u.siteId, u);
+        this.human = this.makePlayer('you', name, color, 'human', this.layout.spawn);
+
+        net.listen((m) => this.receive(m), () => { this.disconnected = true; });
+        net.send({ t: 'join', v: PROTOCOL_VERSION, name, color });
+    }
+
+    /** Stop listening (the scene is closing). */
+    leave (): void
+    {
+        this.net.listen(null);
+        this.net.send({ t: 'leave' });
+    }
+
+    // -----------------------------------------------------------------------
+    // GameWorld
+    // -----------------------------------------------------------------------
+
+    update (now: number, _dt: number, input: Vec2, split: boolean | Vec2 | null, surrender: Vec2 | null): WorldEvents
+    {
+        this.sendInput(input, split, surrender);
+        const events = this.takeQueued();
+        if (this.clockOffset === null) return events;
+
+        const renderTime = performance.now() + this.clockOffset - INTERPOLATION_MS;
+        while (this.pending.length > 0 && this.pending[0].time <= renderTime)
+        {
+            this.apply(this.pending.shift()!, now, events);
+        }
+        this.interpolate(renderTime);
+        return events;
+    }
+
+    splitState (): { clusters: number; regroupSeconds: number | null } | null
+    {
+        if (!this.you || this.human.respawnAt !== null || this.you.clusters <= 1) return null;
+        return { clusters: this.you.clusters, regroupSeconds: this.you.regroup };
+    }
+
+    defeatStats (): DefeatStats
+    {
+        const d = this.defeat;
+        return {
+            kills: d?.kills ?? this.human.kills,
+            largestArmy: d?.largestArmy ?? this.human.stats.peakArmy,
+            shards: d?.shards ?? this.human.resources.soulShards,
+            survivalMs: d?.survivalMs ?? 0,
+            rank: d?.rank ?? 1,
+            competitors: d?.competitors ?? this.players.length,
+        };
+    }
+
+    // -----------------------------------------------------------------------
+    // Messages
+    // -----------------------------------------------------------------------
+
+    private receive (m: ServerMessage): void
+    {
+        switch (m.t)
+        {
+            case 'joined': this.myId = m.id; return;
+            case 'state': this.applyState(m); return;
+            case 'snap': this.queueSnapshot(m); return;
+            case 'defeat':
+                this.defeat = m;
+                this.humanDefeated = true;
+                this.human.stats.defeatedAt = performance.now();
+                return;
+            case 'error': this.refused = m.reason; return;
+            case 'lobby': return;
+        }
+    }
+
+    private applyState (m: StateMessage): void
+    {
+        const now = performance.now();
+        const queued = this.queued;
+        for (let i = 0; i < m.shards.length; i += 4)
+        {
+            const shard = this.shards.shards[m.shards[i]];
+            if (!shard) continue;
+            shard.x = m.shards[i + 1];
+            shard.y = m.shards[i + 2];
+            shard.active = m.shards[i + 3] === 1;
+        }
+        for (const row of m.bodies)
+        {
+            const body = this.addBody(row, now);
+            queued.bodiesFallen.push(body);
+            if (body.awake) queued.bodiesAwakened.push(body);
+        }
+        this.ready = true;
+        this.matchStartedAt = now;
+    }
+
+    private queueSnapshot (m: SnapshotMessage): void
+    {
+        const sample = m.time - performance.now();
+        // Follow the server clock smoothly; jump if it's far off (first snapshot, or a stall).
+        this.clockOffset = this.clockOffset === null || Math.abs(sample - this.clockOffset) > 1000
+            ? sample
+            : this.clockOffset + (sample - this.clockOffset) * 0.05;
+
+        const warriors = new Map<number, { x: number; y: number }>();
+        const leads = new Map<string, { x: number; y: number }>();
+        for (const row of m.players)
+        {
+            leads.set(row[0], { x: row[7], y: row[8] });
+            const list = row[12];
+            for (let i = 0; i < list.length; i += 5) warriors.set(list[i], { x: list[i + 1], y: list[i + 2] });
+        }
+        const neutrals = new Map<number, { x: number; y: number }>();
+        for (let i = 0; i < m.neutrals.length; i += 5) neutrals.set(m.neutrals[i], { x: m.neutrals[i + 2], y: m.neutrals[i + 3] });
+        this.pending.push({ time: m.time, you: m.you, message: m, warriors, leads, neutrals });
+        // Never fall far behind: drop old snapshots if many pile up (e.g. a background tab).
+        while (this.pending.length > 30) this.apply(this.pending.shift()!, performance.now(), this.queued);
+    }
+
+    private sendInput (input: Vec2, split: boolean | Vec2 | null, surrender: Vec2 | null): void
+    {
+        const now = performance.now();
+        const changed = Math.abs(input.x - this.lastInput.x) > 0.02 || Math.abs(input.y - this.lastInput.y) > 0.02;
+        if ((changed && now - this.lastInputSentAt >= INPUT_INTERVAL_MS) || now - this.lastInputSentAt >= INPUT_KEEPALIVE_MS)
+        {
+            this.net.send({ t: 'in', x: round3(input.x), y: round3(input.y) });
+            this.lastInput = { ...input };
+            this.lastInputSentAt = now;
+        }
+        if (split)
+        {
+            const aim = typeof split === 'object' ? split : this.human.army.lead.heading;
+            this.net.send({ t: 'split', x: round3(aim.x), y: round3(aim.y) });
+        }
+        if (surrender) this.net.send({ t: 'surrender', x: round3(surrender.x), y: round3(surrender.y) });
+    }
+
+    // -----------------------------------------------------------------------
+    // Applying a snapshot
+    // -----------------------------------------------------------------------
+
+    private apply (snap: Decoded, now: number, events: WorldEvents): void
+    {
+        const m = snap.message;
+        if (snap.you) this.you = snap.you;
+        const firstApply = this.firstApply;
+        this.firstApply = false;
+
+        // Players: create newcomers, update everyone, drop those who left.
+        const present = new Set<string>();
+        for (const row of m.players)
+        {
+            const [id, name, color, kind, alive, kills, peak, leadX, leadY, headingX, headingY, rep] = row;
+            present.add(id);
+            let p = this.playersById.get(id);
+            if (!p)
+            {
+                p = id === this.myId ? this.adoptHuman(id) : this.makePlayer(id, name, color, kind === 1 ? 'bot' : 'human', { x: leadX, y: leadY });
+                this.playersById.set(id, p);
+                this.players.push(p);
+            }
+            p.name = name;
+            p.colorId = color;
+            p.respawnAt = alive ? null : Infinity;
+            p.kills = kills;
+            p.stats.peakArmy = peak;
+            p.army.representativeId = rep >= 0 ? rep : null;
+            p.army.lead.heading.x = headingX;
+            p.army.lead.heading.y = headingY;
+            this.leadFrom.set(id, { x: leadX, y: leadY });
+        }
+        for (let i = this.players.length - 1; i >= 0; i--)
+        {
+            const p = this.players[i];
+            if (present.has(p.id)) continue;
+            this.players.splice(i, 1);
+            this.playersById.delete(p.id);
+            this.leadFrom.delete(p.id);
+        }
+        if (this.you)
+        {
+            const r = this.human.resources;
+            r.soulShards = this.you.soulShards;
+            r.recruitProgress = this.you.recruitProgress;
+            r.archerProgress = this.you.archerProgress;
+        }
+
+        // Soldiers: who joined how, who died, who surrendered (and as which neutral).
+        const e = m.events;
+        const joinedHow = new Map<number, number>();
+        for (let i = 0; i < e.joined.length; i += 2) joinedHow.set(e.joined[i], e.joined[i + 1]);
+        const died = new Set(e.deaths);
+        const surrenderedAs = new Map<number, number>();
+        for (let i = 0; i < e.surrendered.length; i += 2) surrenderedAs.set(e.surrendered[i], e.surrendered[i + 1]);
+
+        const seen = new Set<number>();
+        for (const row of m.players)
+        {
+            const owner = this.playersById.get(row[0])!;
+            const soldiers: Warrior[] = [];
+            const list = row[12];
+            for (let i = 0; i < list.length; i += 5)
+            {
+                const id = list[i];
+                const flags = list[i + 4];
+                seen.add(id);
+                let t = this.warriors.get(id);
+                if (!t)
+                {
+                    const archer = (flags & WARRIOR_ARCHER) !== 0;
+                    const maxHp = archer ? this.config.combat.archer.maxHp : this.config.combat.maxHp;
+                    const warrior = createWarrior(id, { x: list[i + 1], y: list[i + 2] }, maxHp, archer ? 'archer' : 'warrior');
+                    t = { warrior, owner, from: { x: list[i + 1], y: list[i + 2] } };
+                    this.warriors.set(id, t);
+                    const how = joinedHow.get(id);
+                    if (firstApply || how === undefined) (events.appeared ??= []).push({ warrior, owner });
+                    else if (how === JOIN_RECRUITED) events.respawned.push({ player: owner, warriors: [warrior] });
+                    else events.summoned.push({ warrior, owner });
+                }
+                const w = t.warrior;
+                t.owner = owner;
+                t.from = { x: list[i + 1], y: list[i + 2] };
+                w.hp = list[i + 3];
+                w.facing = flags & WARRIOR_FACING_LEFT ? -1 : 1;
+                w.isMoving = (flags & WARRIOR_MOVING) !== 0;
+                w.burningUntil = flags & WARRIOR_BURNING ? now + 300 : 0;
+                soldiers.push(w);
+            }
+            owner.army.clusters[0].cluster.warriors = soldiers;
+        }
+
+        // Neutrals: positions, comings and goings.
+        const neutralSeen = new Set<number>();
+        const newNeutrals = new Map<number, NeutralWarrior>();
+        for (let i = 0; i < m.neutrals.length; i += 5)
+        {
+            const siteId = m.neutrals[i];
+            const kind = NEUTRAL_KINDS[m.neutrals[i + 1]] ?? 'wanderer';
+            const x = m.neutrals[i + 2];
+            const y = m.neutrals[i + 3];
+            const flags = m.neutrals[i + 4];
+            neutralSeen.add(siteId);
+            let u = this.neutralsBySite.get(siteId);
+            const available = (flags & NEUTRAL_AVAILABLE) !== 0;
+            if (!u)
+            {
+                u = makeNeutral(siteId, kind, x, y);
+                this.neutralsBySite.set(siteId, u);
+                this.neutrals.units.push(u);
+                newNeutrals.set(siteId, u);
+            }
+            else if (u.available && !available) (events.neutralsGone ??= []).push(u);
+            else if (!u.available && available) events.neutralsRespawned.push(u);
+            u.available = available;
+            u.facing = flags & NEUTRAL_FACING_LEFT ? -1 : 1;
+            u.isMoving = (flags & NEUTRAL_MOVING) !== 0;
+            if (kind === 'surrendered') u.recruitableAt = flags & NEUTRAL_READY ? 1 : Infinity;
+            if (!available || newNeutrals.has(siteId)) u.position = { x, y };
+            this.neutralFrom.set(siteId, { x, y });
+        }
+        for (let i = this.neutrals.units.length - 1; i >= 0; i--)
+        {
+            const u = this.neutrals.units[i];
+            if (neutralSeen.has(u.siteId)) continue;
+            // Gone for good (a surrendered soldier someone recruited).
+            this.neutrals.units.splice(i, 1);
+            this.neutralsBySite.delete(u.siteId);
+            this.neutralFrom.delete(u.siteId);
+            if (u.available) (events.neutralsGone ??= []).push(u);
+        }
+
+        // Soldiers who are no longer in any army.
+        for (const [id, t] of this.warriors)
+        {
+            if (seen.has(id)) continue;
+            this.warriors.delete(id);
+            const site = surrenderedAs.get(id);
+            const neutral = site !== undefined ? newNeutrals.get(site) : undefined;
+            if (died.has(id)) events.deaths.push({ warrior: t.warrior, owner: t.owner, killer: null } as Death);
+            else if (neutral)
+            {
+                events.surrendered.push({ warrior: t.warrior, neutral });
+                newNeutrals.delete(site!);
+            }
+            else (events.vanished ??= []).push(t.warrior);
+        }
+        // Neutrals that appeared without a release we saw (e.g. right after joining).
+        for (const u of newNeutrals.values()) (events.neutralsAdded ??= []).push(u);
+
+        // Fights and effects.
+        for (let i = 0; i < e.hits.length; i += 3)
+        {
+            const attacker = this.warriors.get(e.hits[i]);
+            const target = this.warriors.get(e.hits[i + 1]);
+            if (!attacker || !target) continue;
+            events.hits.push({
+                attacker: attacker.warrior, target: target.warrior, attackerOwner: attacker.owner, targetOwner: target.owner,
+                damage: 0, ranged: e.hits[i + 2] === 1,
+            } as Hit);
+        }
+        for (const id of e.burns)
+        {
+            const t = this.warriors.get(id);
+            if (t) events.lavaBurns.push(t.warrior);
+        }
+        for (let i = 0; i < e.splits.length; i += 2) events.splits.push({ x: e.splits[i], y: e.splits[i + 1] });
+        for (let i = 0; i < e.merges.length; i += 2) events.merges.push({ x: e.merges[i], y: e.merges[i + 1] });
+
+        // Shards.
+        for (const id of e.shardsCollected)
+        {
+            const shard = this.shards.shards[id];
+            if (!shard || !shard.active) continue;
+            shard.active = false;
+            events.shardsCollected.push(shard);
+        }
+        for (let i = 0; i < e.shardsRespawned.length; i += 3)
+        {
+            const shard = this.shards.shards[e.shardsRespawned[i]];
+            if (!shard) continue;
+            shard.x = e.shardsRespawned[i + 1];
+            shard.y = e.shardsRespawned[i + 2];
+            shard.active = true;
+            events.shardsRespawned.push(shard);
+        }
+
+        // Fallen bodies.
+        for (const row of e.bodiesFallen) events.bodiesFallen.push(this.addBody(row, now));
+        for (const id of e.bodiesAwakened)
+        {
+            const body = this.bodies.get(id);
+            if (!body || body.awake) continue;
+            body.awake = true;
+            events.bodiesAwakened.push(body);
+        }
+        for (const id of e.bodiesRemoved)
+        {
+            const body = this.bodies.get(id);
+            if (!body) continue;
+            this.bodies.delete(id);
+            events.bodiesExpired.push(body);
+        }
+
+        this.applied = snap;
+    }
+
+    /** Glide everything between the last applied snapshot and the next one. */
+    private interpolate (renderTime: number): void
+    {
+        const from = this.applied;
+        if (!from) return;
+        const to = this.pending[0];
+        const span = to ? to.time - from.time : 0;
+        const blend = span > 0 ? Math.max(0, Math.min(1, (renderTime - from.time) / span)) : 1;
+        const lerp = (a: Vec2, b: { x: number; y: number } | undefined, out: Vec2) => {
+            if (!b || !to) { out.x = a.x; out.y = a.y; return; }
+            out.x = a.x + (b.x - a.x) * blend;
+            out.y = a.y + (b.y - a.y) * blend;
+        };
+
+        for (const [id, t] of this.warriors) lerp(t.from, to?.warriors.get(id), t.warrior.position);
+        for (const [id, a] of this.leadFrom)
+        {
+            const p = this.playersById.get(id);
+            if (p) lerp(a, to?.leads.get(id), p.army.lead.center.position);
+        }
+        for (const [site, a] of this.neutralFrom)
+        {
+            const u = this.neutralsBySite.get(site);
+            if (u?.available) lerp(a, to?.neutrals.get(site), u.position);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+
+    private addBody (row: BodyRow, now: number): FallenBody
+    {
+        const [id, x, y, colorId, facing, archer, readyIn, expiresIn, awake] = row;
+        const body: FallenBody = {
+            id, position: { x, y }, colorId, facing: facing < 0 ? -1 : 1,
+            fallenAt: now, readyAt: now + readyIn, expiresAt: now + expiresIn, awake: awake === 1, role: archer ? 'archer' : 'warrior',
+        };
+        this.bodies.set(id, body);
+        return body;
+    }
+
+    private takeQueued (): WorldEvents
+    {
+        const q = this.queued;
+        this.queued = emptyWorldEvents();
+        return q;
+    }
+
+    /** Our own army appeared in a snapshot: from now on `human` is that player. */
+    private adoptHuman (id: string): Player
+    {
+        this.human.id = id;
+        return this.human;
+    }
+
+    private makePlayer (id: string, name: string, colorId: string, kind: 'human' | 'bot', at: Vec2): Player
+    {
+        return {
+            id, name, kind, colorId,
+            resources: createPlayerResources(),
+            army: createPlayerArmy(at),
+            lastCombatAt: -Infinity,
+            respawnAt: null,
+            kills: 0,
+            stats: { peakArmy: 1, startedAt: 0, defeatedAt: null },
+        };
+    }
+}
+
+function makeNeutral (siteId: number, kind: NeutralWarrior['kind'], x: number, y: number): NeutralWarrior
+{
+    return {
+        id: -siteId - 1, siteId, kind,
+        home: { x, y }, position: { x, y }, velocity: { x: 0, y: 0 },
+        facing: 1, isMoving: false, available: true, respawnAt: 0,
+        wanderTarget: null, nextWanderAt: 0, roam: 0,
+        recruitableAt: kind === 'surrendered' ? Infinity : 0, role: 'warrior',
+    };
+}
+
+function emptyWorldEvents (): WorldEvents
+{
+    return {
+        shardsCollected: [], shardsRespawned: [], neutralsRecruited: [], neutralsRespawned: [], summoned: [],
+        splits: [], merges: [], surrendered: [], hits: [], deaths: [], eliminated: [], respawned: [],
+        bodiesFallen: [], bodiesAwakened: [], bodiesRevived: [], bodiesExpired: [], lavaBurns: [],
+    };
+}
+
+function round3 (n: number): number
+{
+    return Math.round(n * 1000) / 1000;
+}
