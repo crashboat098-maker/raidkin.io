@@ -22,6 +22,8 @@ export interface HudData {
     getSplitState: () => SplitState | null;
     /** Live ranking of every competitor. */
     getLeaderboard: () => LeaderboardRow[];
+    /** Your player id (to highlight your row). */
+    getMyId: () => string;
     playerColor: ArmyColor;
     recruitCost: number;
     /** Green crystals per Archer. */
@@ -51,6 +53,8 @@ const BOARD = {
     rowHeight: 24,
     headerHeight: 32,
     nameChars: 10,
+    /** Most rows shown (online games can have many players). */
+    maxRows: 10,
     col: { rank: 12, swatch: 34, name: 54, army: 266, kills: 350 },
     refreshMs: 250,
 };
@@ -127,6 +131,8 @@ export class Hud extends Scene
     private mainSeparatorXs: number[] = [];
     private shown = { total: -1, progress: -1, archer: -1, army: -1, split: '' };
 
+    private boardBackground: GameObjects.Graphics;
+    private boardShownRows = -1;
     private boardGraphics: GameObjects.Graphics;
     /** Small crown beside the #1 army's name. */
     private boardCrown: GameObjects.Image;
@@ -146,6 +152,7 @@ export class Hud extends Scene
         this.shown = { total: -1, progress: -1, archer: -1, army: -1, split: '' };
         this.splitObjects = [];
         this.boardRows = [];
+        this.boardShownRows = -1;
         this.boardKey = '';
         this.nextBoardAt = 0;
         ensurePixelFont(this);
@@ -285,16 +292,11 @@ export class Hud extends Scene
 
     private createLeaderboard (width: number): void
     {
-        const rows = this.source.getLeaderboard().length;
         const x = width - PADDING_X - BOARD.width;
         this.boardX = x;
         const y = BOARD.top;
-        const height = BOARD.headerHeight + rows * BOARD.rowHeight + 6;
 
-        const bg = this.add.graphics();
-        bg.fillStyle(COLORS.borderDark, 1).fillRect(x - 2, y - 2, BOARD.width + 4, height + 4);
-        bg.fillStyle(COLORS.background, 0.86).fillRect(x, y, BOARD.width, height);
-        bg.fillStyle(COLORS.borderLight, 0.8).fillRect(x, y + BOARD.headerHeight - 6, BOARD.width, 1);
+        this.boardBackground = this.add.graphics();
         this.boardGraphics = this.add.graphics();
         this.boardCrown = this.add.image(0, 0, Tex.Crown).setScale(TEXT_SCALE).setOrigin(0, 0.5).setVisible(false);
 
@@ -304,34 +306,59 @@ export class Hud extends Scene
         header(BOARD.col.name, 'NAME');
         header(BOARD.col.army, 'ARMY', true);
         header(BOARD.col.kills, 'KILLS', true);
+        this.sizeLeaderboard(this.source.getLeaderboard().length);
+    }
 
-        for (let i = 0; i < rows; i++)
+    /** Fit the panel to `count` rows (online, people come and go), making more rows as needed. */
+    private sizeLeaderboard (count: number): void
+    {
+        count = Math.min(count, BOARD.maxRows);
+        const x = this.boardX;
+        const y = BOARD.top;
+        while (this.boardRows.length < count)
         {
-            const rowY = y + BOARD.headerHeight + i * BOARD.rowHeight;
+            const rowY = y + BOARD.headerHeight + this.boardRows.length * BOARD.rowHeight;
             const make = (col: number, alignRight = false) =>
                 this.add.bitmapText(x + col, rowY, PIXEL_FONT, '').setScale(TEXT_SCALE).setOrigin(alignRight ? 1 : 0, 0);
             this.boardRows.push({ rank: make(BOARD.col.rank), name: make(BOARD.col.name), army: make(BOARD.col.army, true), kills: make(BOARD.col.kills, true) });
         }
+        this.boardRows.forEach((r, i) => {
+            for (const t of [r.rank, r.name, r.army, r.kills]) t.setVisible(i < count);
+        });
+        if (count === this.boardShownRows) return;
+        this.boardShownRows = count;
+        const height = BOARD.headerHeight + count * BOARD.rowHeight + 6;
+        this.boardBackground.clear()
+            .fillStyle(COLORS.borderDark, 1).fillRect(x - 2, y - 2, BOARD.width + 4, height + 4)
+            .fillStyle(COLORS.background, 0.86).fillRect(x, y, BOARD.width, height)
+            .fillStyle(COLORS.borderLight, 0.8).fillRect(x, y + BOARD.headerHeight - 6, BOARD.width, 1);
     }
 
     private refreshLeaderboard (): void
     {
-        const rows = this.source.getLeaderboard();
+        const all = this.source.getLeaderboard();
+        const me = this.source.getMyId();
+        // The top of the table, always including you (in the last row if you're further down).
+        const rows = all.slice(0, BOARD.maxRows);
+        const mine = all.find((r) => r.playerId === me);
+        if (mine && !rows.includes(mine)) rows[rows.length - 1] = mine;
         const key = rows.map((r) => `${r.playerId}:${r.soldiers}:${r.kills}:${r.alive}`).join('|');
         if (key === this.boardKey) return;
         this.boardKey = key;
+        this.sizeLeaderboard(rows.length);
 
         const g = this.boardGraphics.clear();
-        const leader = leaderId(rows);
+        const leader = leaderId(all);
         this.boardCrown.setVisible(false);
         rows.forEach((row, i) => {
             const objects = this.boardRows[i];
             if (!objects) return;
             const rowY = BOARD.top + BOARD.headerHeight + i * BOARD.rowHeight;
             const colors = Palette.armies[row.colorId as ArmyColor] ?? Palette.armies.crimson;
+            const isMe = row.playerId === me;
 
-            // Highlight the human player's row.
-            if (row.isHuman)
+            // Highlight your row.
+            if (isMe)
             {
                 g.fillStyle(COLORS.you, 0.16).fillRect(this.boardX + 4, rowY - 4, BOARD.width - 8, BOARD.rowHeight - 2);
                 g.fillStyle(COLORS.you, 0.9).fillRect(this.boardX + 4, rowY - 4, 3, BOARD.rowHeight - 2);
@@ -340,10 +367,10 @@ export class Hud extends Scene
             g.fillStyle(hexToInt(Palette.outline), 1).fillRect(this.boardX + BOARD.col.swatch - 1, rowY + 1, 14, 14);
             g.fillStyle(hexToInt(colors.main), row.alive ? 1 : 0.4).fillRect(this.boardX + BOARD.col.swatch, rowY + 2, 12, 12);
 
-            const text = row.isHuman ? COLORS.you : COLORS.value;
+            const text = isMe ? COLORS.you : COLORS.value;
             const alpha = row.alive ? 1 : 0.45;
             const name = row.name.length > BOARD.nameChars ? `${row.name.slice(0, BOARD.nameChars - 1)}.` : row.name;
-            objects.rank.setText(String(row.rank)).setTint(row.isHuman ? COLORS.you : COLORS.label).setAlpha(alpha);
+            objects.rank.setText(String(row.rank)).setTint(isMe ? COLORS.you : COLORS.label).setAlpha(alpha);
             objects.name.setText(name).setTint(text).setAlpha(alpha);
             if (row.playerId === leader)
             {

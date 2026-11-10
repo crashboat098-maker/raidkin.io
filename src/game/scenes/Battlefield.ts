@@ -3,13 +3,16 @@ import { GameConfig } from '../config/GameConfig';
 import { KeyboardControls } from '../input/KeyboardControls';
 import type { Warrior } from '../logic/Army';
 import type { Player } from '../logic/Player';
-import { allWarriors, representative, secondsUntilRegroup, totalSoldiers } from '../logic/PlayerArmy';
+import type { GameWorld } from '../logic/GameWorld';
+import { allWarriors, representative, totalSoldiers } from '../logic/PlayerArmy';
 import type { Vec2 } from '../logic/Types';
 import { World } from '../logic/World';
+import { netClient } from '../net/NetClient';
+import { NetWorld } from '../net/NetWorld';
 import { addVignette, buildBattlefieldView, fitVignette } from '../render/BattlefieldView';
 import { ZoomController } from '../render/CameraZoom';
 import { CombatEffects } from '../render/CombatEffects';
-import { finalRank, leaderId, rankPlayers } from '../logic/Leaderboard';
+import { leaderId, rankPlayers } from '../logic/Leaderboard';
 import { FallenView } from '../render/FallenView';
 import { botColorsFor, Palette } from '../render/Palette';
 import type { DefeatData } from './Defeat';
@@ -29,7 +32,11 @@ import type { HudData } from './Hud';
  */
 export class Battlefield extends Scene
 {
-    private world: World;
+    private world: GameWorld;
+    /** The online match (null in a practice match). */
+    private net: NetWorld | null = null;
+    /** Views, camera and HUD are set up (online: once the server's starting state arrived). */
+    private sceneReady = false;
 
     private armyView: ArmyView;
     private armyMarkers: ArmyMarkers;
@@ -65,8 +72,26 @@ export class Battlefield extends Scene
         this.defeatShown = false;
         this.cameraTarget = null;
 
-        // 2. A fresh game world: map, resources, neutrals, the player and 3 bots.
+        // 2. The match: online on the game server if it's reachable, otherwise a
+        //    practice match in this browser (map, resources, neutrals, you and 3 bots).
+        this.sceneReady = false;
+        this.net = null;
+        if (netClient.online)
+        {
+            this.net = new NetWorld(GameConfig, netClient, this.settings.name, this.settings.color);
+            this.world = this.net;
+            this.events.once('shutdown', () => this.net?.leave());
+            // The rest is set up once the server has sent the starting state (see update).
+            return;
+        }
         this.world = new World(GameConfig, { humanName: this.settings.name, humanColor: this.settings.color }, botColorsFor(this.settings.color));
+        this.setUpMatch();
+    }
+
+    /** Views, input, camera and HUD for the match in `this.world`. */
+    private setUpMatch (): void
+    {
+        this.sceneReady = true;
         const { layout } = this.world;
 
         // 3. Visuals for that world.
@@ -107,15 +132,12 @@ export class Battlefield extends Scene
         };
 
         // 6. HUD runs as a separate scene on top.
-        const human = this.world.human;
         const hudData: HudData = {
-            getResources: () => human.resources,
-            getArmySize: () => (human.respawnAt === null ? totalSoldiers(human.army) : 0),
-            getSplitState: () => {
-                if (human.respawnAt !== null || human.army.clusters.length <= 1) return null;
-                return { clusters: human.army.clusters.length, regroupSeconds: secondsUntilRegroup(human.army, this.time.now, GameConfig.army) };
-            },
+            getResources: () => this.world.human.resources,
+            getArmySize: () => (this.world.human.respawnAt === null ? totalSoldiers(this.world.human.army) : 0),
+            getSplitState: () => this.world.splitState(this.time.now),
             getLeaderboard: () => rankPlayers(this.world.players),
+            getMyId: () => this.world.human.id,
             playerColor: this.settings.color,
             recruitCost: GameConfig.army.recruitCost,
             archerCost: GameConfig.army.archerCost,
@@ -125,20 +147,41 @@ export class Battlefield extends Scene
 
     update (time: number, delta: number)
     {
+        // Online: wait for the server's starting state; give up to the start screen if it goes away.
+        if (this.net && (this.net.disconnected || this.net.refused))
+        {
+            const reason = this.net.refused === 'full' ? 'SERVER FULL' : this.net.refused === 'version' ? 'NEW VERSION - RELOAD THE PAGE' : 'CONNECTION LOST';
+            this.scene.stop('Hud');
+            this.scene.stop('Defeat');
+            this.scene.start('Start', { ...this.settings, notice: reason });
+            return;
+        }
+        if (!this.sceneReady)
+        {
+            if (this.net?.ready) this.setUpMatch();
+            else return;
+        }
+
         // Cap the frame time so a background tab doesn't cause a huge jump.
         const dt = Math.min(delta, 50) / 1000;
         const world = this.world;
         const human = world.human;
 
         // --- Gameplay (all in World) ---
-        const split = this.controls.consumeSplitPress();
         const armyAt = human.army.lead.center.position;
+        const split = this.controls.consumeSplit(armyAt, human.army.lead.heading);
         const surrender = this.controls.consumeSurrender(armyAt, human.army.lead.heading);
         const events = world.update(time, dt, this.controls.getMoveDirection(armyAt), split, surrender);
 
         // --- Visuals for what happened ---
         for (const point of events.splits) playJoinEffect(this, point.x, point.y, Palette.accent.purple);
         for (const point of events.merges) playJoinEffect(this, point.x, point.y, Palette.accent.amber);
+        // Online only: soldiers already there when you joined, soldiers of players who left,
+        // and neutrals coming and going.
+        for (const { warrior, owner } of events.appeared ?? []) this.addSoldier(warrior, owner, null);
+        for (const warrior of events.vanished ?? []) this.armyView.release(warrior);
+        for (const neutral of events.neutralsGone ?? []) this.neutralView.recruited(neutral);
+        for (const neutral of events.neutralsAdded ?? []) this.neutralView.add(neutral);
         for (const { warrior, neutral } of events.surrendered)
         {
             this.armyView.release(warrior);
@@ -218,15 +261,7 @@ export class Battlefield extends Scene
         if (!this.defeatShown && world.humanDefeated)
         {
             this.defeatShown = true;
-            const defeat: DefeatData = {
-                settings: { ...this.settings },
-                kills: human.kills,
-                largestArmy: human.stats.peakArmy,
-                shards: human.resources.soulShards,
-                survivalMs: (human.stats.defeatedAt ?? time) - (world.matchStartedAt ?? time),
-                rank: finalRank(human, world.players),
-                competitors: world.players.length,
-            };
+            const defeat: DefeatData = { settings: { ...this.settings }, ...world.defeatStats(time) };
             this.scene.launch('Defeat', defeat);
         }
     }

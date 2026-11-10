@@ -26,6 +26,27 @@ export interface CombatSettings {
     regenPerSecond: number;
     /** Archers: less health, shoot from range. */
     archer: { maxHp: number; damage: number; range: number; attackIntervalMs: number };
+    /**
+     * Soldiers in a split-off cluster hit according to that cluster's size:
+     * [cluster size, share of normal damage] rows, blended in between and held
+     * past either end. The main cluster always hits at full damage.
+     */
+    clusterDamage: readonly (readonly [number, number])[];
+}
+
+/** A split-off cluster of `size` soldiers hits for this share of normal damage. */
+export function clusterDamageShare (size: number, table: CombatSettings['clusterDamage']): number
+{
+    if (table.length === 0) return 1;
+    for (let i = 0; i < table.length; i++)
+    {
+        const [high, highShare] = table[i];
+        if (size > high) continue;
+        if (i === 0) return highShare;
+        const [low, lowShare] = table[i - 1];
+        return lowShare + ((highShare - lowShare) * (size - low)) / (high - low);
+    }
+    return table[table.length - 1][1];
 }
 
 export interface Hit {
@@ -156,8 +177,10 @@ export function resolveAttacks (players: readonly Player[], now: number, setting
 
     for (const [attackerOwner, enemies] of rivals)
     {
-        for (const { cluster } of attackerOwner.army.clusters)
+        for (const { cluster, parentId } of attackerOwner.army.clusters)
         {
+            // The main cluster (no parent) hits at full damage; split-off clusters by their size.
+            const share = parentId === null ? 1 : clusterDamageShare(cluster.warriors.length, settings.clusterDamage);
             for (const attacker of cluster.warriors)
             {
                 if (attacker.hp <= 0 || now < attacker.nextAttackAt) continue;
@@ -175,7 +198,7 @@ export function resolveAttacks (players: readonly Player[], now: number, setting
                     });
                 }
                 if (!target || !targetOwner) continue;
-                strike(attacker, target, attackerOwner, targetOwner, now, settings, rng, hits);
+                strike(attacker, target, attackerOwner, targetOwner, now, settings, rng, hits, share);
             }
         }
     }
@@ -185,11 +208,11 @@ export function resolveAttacks (players: readonly Player[], now: number, setting
 /** One blow: damage the target, reset the attacker's swing, and mark both armies as in combat. */
 function strike (
     attacker: Warrior, target: Warrior, attackerOwner: Player, targetOwner: Player,
-    now: number, settings: CombatSettings, rng: Rng, hits: Hit[],
+    now: number, settings: CombatSettings, rng: Rng, hits: Hit[], damageShare = 1,
 ): void
 {
     const ranged = attacker.role === 'archer';
-    const base = ranged ? settings.archer.damage : settings.damage;
+    const base = (ranged ? settings.archer.damage : settings.damage) * damageShare;
     const damage = Math.round(base * (1 + (rng() * 2 - 1) * settings.damageVariance));
     target.hp = Math.max(0, target.hp - damage);
     attacker.nextAttackAt = now + (ranged ? settings.archer.attackIntervalMs : settings.attackIntervalMs) * (0.9 + rng() * 0.2);

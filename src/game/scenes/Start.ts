@@ -6,6 +6,7 @@ import { ARMY_COLORS, hexToInt, Palette, type ArmyColor } from '../render/Palett
 import { ensurePixelFont, PIXEL_FONT } from '../render/PixelFont';
 import { createPlaceholderTextures, Tex } from '../render/PlaceholderArt';
 import { BUTTON_PRIMARY, drawStonePanel, PixelButton } from '../render/UiKit';
+import { netClient } from '../net/NetClient';
 import { isNameChar, loadSettings, NAME_MAX_LENGTH, sanitizeName, saveSettings, type PlayerSettings } from './PlayerSettings';
 
 /**
@@ -88,6 +89,21 @@ export class Start extends Scene
 
         // --- Start ---
         const startButton = new PixelButton(this, LEFT, 522, 440, 70, 'START GAME', 4, BUTTON_PRIMARY, () => this.startGame());
+
+        // Online or practice? (Updated while this screen is open.) A notice from a
+        // dropped match shows first, in amber.
+        const notice = (data as { notice?: string } | undefined)?.notice ?? null;
+        const status = this.add.bitmapText(LEFT + 220, 604, PIXEL_FONT, '').setOrigin(0.5, 0).setScale(2);
+        const noticeUntil = this.time.now + 5000;
+        const showStatus = () => {
+            if (notice && this.time.now < noticeUntil) { status.setText(notice).setTint(hexToInt(Palette.accent.amber)); return; }
+            const lobby = netClient.lobby;
+            if (netClient.online && lobby) status.setText(lobby.full ? 'SERVER FULL - PRACTICE VS BOTS' : `ONLINE - ${lobby.playing} PLAYING`).setTint(TEXT.value);
+            else if (netClient.configured) status.setText('CONNECTING - OR PRACTICE VS BOTS').setTint(TEXT.dim);
+            else status.setText('PRACTICE VS BOTS').setTint(TEXT.dim);
+        };
+        showStatus();
+        this.time.addEvent({ delay: 500, loop: true, callback: showStatus });
 
         // --- Preview ---
         this.add.image(PREVIEW.x, PREVIEW.y + 6, Tex.Shadow).setScale(5, 3).setAlpha(0.8);

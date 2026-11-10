@@ -3,6 +3,7 @@ import { Defeat } from './scenes/Defeat';
 import { Hud } from './scenes/Hud';
 import { Start } from './scenes/Start';
 import { GameConfig } from './config/GameConfig';
+import { netClient } from './net/NetClient';
 import { AUTO, Game, Scale, Types } from 'phaser';
 
 // Find out more information about the Game Config at:
@@ -31,6 +32,8 @@ const config: Types.Core.GameConfig = {
 };
 
 const StartGame = (parent: string) => {
+    // Connect to the multiplayer server in the background (if this page has one).
+    netClient.start();
     const game = new Game({ ...config, parent });
     // Development only (not in production builds): lets automated tests
     // inspect and drive the running game from the browser console.

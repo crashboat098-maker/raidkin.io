@@ -41,6 +41,8 @@ export interface ArmyCluster {
     parentId: number | null;
     /** When this cluster was last split (its regroup timer counts from here). */
     splitAt: number;
+    /** Until this time the cluster rushes out to its place in the fan (0 = not launching). */
+    launchUntil: number;
     route: FollowRoute;
     nextPlanAt: number;
     lastCheckPosition: Vec2;
@@ -67,6 +69,9 @@ export interface PlayerArmySettings extends ClusterSettings {
         maxClusters: number;
         cooldownMs: number;
         regroup: { minMs: number; perSoldierMs: number; maxMs: number; maxWaitForReturnMs: number };
+        /** Freshly split clusters rush out to their place this many times faster, for at most launchMs. */
+        launchBoost: number;
+        launchMs: number;
         clusterGap: number;
         followSpeedMultiplier: number;
         replanMs: number;
@@ -86,6 +91,7 @@ function wrapCluster (cluster: Cluster, parentId: number | null, splitAt: number
         cluster,
         parentId,
         splitAt,
+        launchUntil: 0,
         route: { mode: 'direct' },
         nextPlanAt: 0,
         lastCheckPosition: { ...cluster.center.position },
@@ -252,20 +258,23 @@ export function canSplit (army: PlayerArmy, now: number, settings: PlayerArmySet
 }
 
 /**
- * SPACE: split every cluster that has enough soldiers into two halves,
- * side by side (left and right of the direction of travel), so the army
- * keeps marching abreast. Largest clusters split first if the cluster cap
- * would be reached. Returns the new clusters' centres (for effects).
+ * SPACE: split every cluster that has enough soldiers into two halves.
+ * The front half (toward `aim`, where the player points) breaks off and
+ * rushes out to its place around the lead; the back half stays. Largest
+ * clusters split first if the cluster cap would be reached. Returns the
+ * new clusters' centres (for effects).
+ *
+ * @param aim Direction to split toward; null = the way the army is heading.
  */
 export function splitArmy (
-    army: PlayerArmy, now: number, obstacles: ObstacleMap, bounds: Rect, settings: PlayerArmySettings,
+    army: PlayerArmy, now: number, obstacles: ObstacleMap, bounds: Rect, settings: PlayerArmySettings, aim: Vec2 | null = null,
 ): Vec2[] | null
 {
     if (!canSplit(army, now, settings)) return null;
 
-    const heading = army.lead.heading;
-    // "Right" relative to the direction of travel.
-    const side = { x: -heading.y, y: heading.x };
+    const aimLength = aim ? Math.hypot(aim.x, aim.y) : 0;
+    const forward = aim && aimLength > 0.001 ? { x: aim.x / aimLength, y: aim.y / aimLength } : { ...army.lead.heading };
+    const launchUntil = now + settings.split.launchMs;
     const candidates = army.clusters
         .filter((c) => c.cluster.warriors.length >= settings.split.minSoldiers)
         .sort((a, b) => b.cluster.warriors.length - a.cluster.warriors.length);
@@ -277,9 +286,10 @@ export function splitArmy (
 
         const cluster = original.cluster;
         const centre = cluster.center.position;
-        const sideways = (w: Warrior) => (w.position.x - centre.x) * side.x + (w.position.y - centre.y) * side.y;
-        const sorted = [...cluster.warriors].sort((a, b) => sideways(a) - sideways(b));
-        const half = Math.floor(sorted.length / 2);
+        // Back half stays (the odd soldier out stays too); front half breaks off toward the aim.
+        const ahead = (w: Warrior) => (w.position.x - centre.x) * forward.x + (w.position.y - centre.y) * forward.y;
+        const sorted = [...cluster.warriors].sort((a, b) => ahead(a) - ahead(b));
+        const half = Math.ceil(sorted.length / 2);
         const left = sorted.slice(0, half);
         const right = sorted.slice(half);
 
@@ -298,9 +308,14 @@ export function splitArmy (
         reassignSlots(newCluster, settings.formationSpacing);
 
         // The new half is the original's child: it returns to it later.
+        // It rushes out to its place (so does a split-off cluster that split again;
+        // the main cluster doesn't get the burst).
         original.splitAt = now;
+        if (original.parentId !== null) original.launchUntil = launchUntil;
         army.parentOf.set(newCluster.id, cluster.id);
-        army.clusters.push(wrapCluster(newCluster, cluster.id, now));
+        const child = wrapCluster(newCluster, cluster.id, now);
+        child.launchUntil = launchUntil;
+        army.clusters.push(child);
         created.push({ ...leftCentre }, { ...rightCentre });
     }
 
@@ -533,7 +548,11 @@ function steerCluster (
         throttle = 1;
     }
 
-    const speed = armySpeed * settings.split.followSpeedMultiplier;
+    // Freshly split: rush out to its place, then settle to normal speed.
+    if (ac.launchUntil > 0 && (now >= ac.launchUntil || (arriving && d < 10))) ac.launchUntil = 0;
+    const launching = ac.launchUntil > 0;
+    const speed = armySpeed * settings.split.followSpeedMultiplier * (launching ? settings.split.launchBoost : 1);
+    if (launching) throttle = 1;
     const input = { x: dx * throttle, y: dy * throttle };
     // Holding its place in the army: move WITH the lead, plus the correction
     // above, so the cluster turns the moment the player does instead of

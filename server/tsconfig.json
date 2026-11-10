@@ -1,0 +1,8 @@
+{
+    "extends": "../tsconfig.json",
+    "compilerOptions": {
+        "types": ["node"]
+    },
+    "include": ["./**/*.ts", "../src/game/logic", "../src/game/net/Protocol.ts", "../src/game/config", "../src/vite-env.d.ts"],
+    "exclude": ["./dist"]
+}
