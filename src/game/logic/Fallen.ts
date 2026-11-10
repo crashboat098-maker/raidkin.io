@@ -98,8 +98,9 @@ export class FallenField
      * Claim every recruitable body within reach of `position` (closest first).
      * Claimed bodies are removed at once, so each can only ever be taken once.
      */
-    reviveNear (position: Vec2, now: number): FallenBody[]
+    reviveNear (position: Vec2, now: number, maxCount = Infinity): FallenBody[]
     {
+        if (maxCount <= 0) return [];
         if (this.readyCount === 0) return [];
         const range = this.settings.reviveRange;
         const found: FallenBody[] = [];
@@ -123,6 +124,8 @@ export class FallenField
             }
         }
         if (found.length > 1) found.sort((a, b) => dist2(a.position, position) - dist2(b.position, position));
+        // Closest first, and no more than the army has room for (the rest stay for others).
+        if (found.length > maxCount) found.length = maxCount;
         for (const body of found) this.remove(body);
         return found;
     }

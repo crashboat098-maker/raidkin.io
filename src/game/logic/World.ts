@@ -28,6 +28,13 @@ type Config = typeof GameConfigType;
 /** The dark canopy at the map edge is always at least this many tiles deep (see buildGround). */
 const MIN_CANOPY_TILES = 2;
 
+/** Where armies can walk: right up to the dark forest canopy at the map edge. */
+export function movementBounds (layout: BattlefieldLayout): Rect
+{
+    const edge = MIN_CANOPY_TILES * layout.tileSize;
+    return { x: edge, y: edge, width: layout.worldWidth - edge * 2, height: layout.worldHeight - edge * 2 };
+}
+
 export interface WorldEvents {
     shardsCollected: SoulShard[];
     shardsRespawned: SoulShard[];
@@ -120,8 +127,7 @@ export class World implements GameWorld
     {
         this.layout = generateBattlefield(config.world);
         this.obstacles = new ObstacleMap(this.layout.obstacles, this.layout.water, config.water.slowdown);
-        const edge = MIN_CANOPY_TILES * this.layout.tileSize;
-        this.moveBounds = { x: edge, y: edge, width: this.layout.worldWidth - edge * 2, height: this.layout.worldHeight - edge * 2 };
+        this.moveBounds = movementBounds(this.layout);
         this.nextUnitId = createIdSource();
         this.rng = createRng((options.seed ?? config.world.seed) + 7);
         this.shards = new SoulShardField(this.layout, config.soulShards, config.world.seed + 1);
@@ -148,7 +154,8 @@ export class World implements GameWorld
                 name, kind: 'bot', colorId: botColors[i % Math.max(1, botColors.length)] ?? `bot${i}`,
                 size: config.bots.startingSize, maxHp: config.combat.maxHp, obstacles: this.obstacles, bounds: this.layout.playArea,
             });
-            bot.bot = createBotState();
+            // Each bot has its own size cap (by order: the 1st bot, the 2nd, ...).
+            bot.bot = createBotState(config.bots.maxSoldiers[i] ?? Infinity);
             this.players.push(bot);
         }
     }
@@ -310,8 +317,10 @@ export class World implements GameWorld
 
         // 6. Soul Shards: any soldier collects; every 5 recruit a Warrior (no army size limit).
         //    Rare green crystals have their own progress, and recruit Archers.
+        //    A bot at its size cap leaves shards and recruits for everyone else.
         for (const p of stillAlive)
         {
+            if (this.roomToGrow(p) <= 0) continue;
             let blue = 0;
             let green = 0;
             for (const w of allWarriors(p.army))
@@ -322,12 +331,12 @@ export class World implements GameWorld
             }
             if (blue > 0)
             {
-                const recruits = applySoulShards(p.resources, blue, c.army.recruitCost);
+                const recruits = Math.min(applySoulShards(p.resources, blue, c.army.recruitCost), this.roomToGrow(p));
                 for (let i = 0; i < recruits; i++) events.summoned.push({ warrior: this.summon(p, 'warrior'), owner: p });
             }
             if (green > 0)
             {
-                const archers = applyGreenShards(p.resources, green, c.army.archerCost);
+                const archers = Math.min(applyGreenShards(p.resources, green, c.army.archerCost), this.roomToGrow(p));
                 for (let i = 0; i < archers; i++) events.summoned.push({ warrior: this.summon(p, 'archer'), owner: p });
             }
         }
@@ -338,7 +347,9 @@ export class World implements GameWorld
         {
             for (const soldier of [...allWarriors(p.army)])
             {
-                const joined = this.neutrals.recruitNear(soldier.position, Infinity, now);
+                const room = this.roomToGrow(p);
+                if (room <= 0) break;
+                const joined = this.neutrals.recruitNear(soldier.position, room, now);
                 for (const neutral of joined)
                 {
                     const warrior = addWarrior(nearestCluster(p.army, neutral.position), this.nextUnitId(), neutral.position, this.maxHpOf(neutral.role), neutral.role);
@@ -360,7 +371,9 @@ export class World implements GameWorld
             {
                 for (const soldier of [...allWarriors(p.army)])
                 {
-                    for (const body of this.fallen.reviveNear(soldier.position, now))
+                    const room = this.roomToGrow(p);
+                    if (room <= 0) break;
+                    for (const body of this.fallen.reviveNear(soldier.position, now, room))
                     {
                         // A fallen Archer rises as an Archer, a Warrior as a Warrior.
                         const warrior = addWarrior(nearestCluster(p.army, body.position), this.nextUnitId(), body.position, this.maxHpOf(body.role), body.role);
@@ -457,6 +470,12 @@ export class World implements GameWorld
         return { warrior, neutral };
     }
 
+    /** How many more soldiers this army may gain (bots stop at their cap; humans never do). */
+    private roomToGrow (p: Player): number
+    {
+        return p.bot ? p.bot.maxSoldiers - totalSoldiers(p.army) : Infinity;
+    }
+
     private maxHpOf (role: SoldierRole): number
     {
         return role === 'archer' ? this.config.combat.archer.maxHp : this.config.combat.maxHp;
@@ -475,7 +494,7 @@ export class World implements GameWorld
         p.resources = createPlayerResources();
         p.kills = 0;
         p.stats = { peakArmy: size, startedAt: this.matchStartedAt ?? 0, defeatedAt: null };
-        if (p.bot) p.bot = createBotState();
+        if (p.bot) p.bot = createBotState(p.bot.maxSoldiers);
     }
 
     /** Open ground far from every living army (falls back to any open spot). */

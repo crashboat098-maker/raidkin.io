@@ -15,7 +15,7 @@ import type { Vec2 } from '../logic/Types';
  */
 
 /** Bump when the messages change, so old pages are told to reload. */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 // ---------------------------------------------------------------------------
 // Browser -> server
@@ -78,6 +78,8 @@ export interface YouRow {
     clusters: number;
     /** Seconds until the next cluster heads back (null if none waiting). */
     regroup: number | null;
+    /** Your army's top speed right now (world px/s), so the browser can move it without waiting. */
+    speed: number;
 }
 
 /**

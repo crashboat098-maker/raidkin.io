@@ -15,7 +15,6 @@ import { CombatEffects } from '../render/CombatEffects';
 import { leaderId, rankPlayers } from '../logic/Leaderboard';
 import { FallenView } from '../render/FallenView';
 import { botColorsFor, Palette } from '../render/Palette';
-import type { DefeatData } from './Defeat';
 import { loadSettings, type PlayerSettings } from './PlayerSettings';
 import { ensurePixelFont } from '../render/PixelFont';
 import { createPlaceholderTextures, Tex } from '../render/PlaceholderArt';
@@ -30,6 +29,9 @@ import type { HudData } from './Hud';
  * this scene just feeds it keyboard input and draws what happens:
  *   keyboard  ->  World.update()  ->  events  ->  visuals
  */
+/** After your last soldier falls, how long the battlefield stays up before the start menu returns. */
+const DEFEAT_PAUSE_MS = 2500;
+
 export class Battlefield extends Scene
 {
     private world: GameWorld;
@@ -257,12 +259,17 @@ export class Battlefield extends Scene
         this.seeThrough.update(human.respawnAt === null ? allWarriors(human.army).map((w) => w.position) : []);
         this.followHuman();
 
-        // The player's last soldier fell: show the defeat screen (the battle carries on behind it).
+        // The player's last soldier fell: a moment to see it happen, then back to the
+        // start menu (to change name or colour), with how it went shown there.
         if (!this.defeatShown && world.humanDefeated)
         {
             this.defeatShown = true;
-            const defeat: DefeatData = { settings: { ...this.settings }, ...world.defeatStats(time) };
-            this.scene.launch('Defeat', defeat);
+            const stats = world.defeatStats(time);
+            const notice = `DEFEATED - RANK ${stats.rank} OF ${stats.competitors} - KILLS ${stats.kills}`;
+            this.time.delayedCall(DEFEAT_PAUSE_MS, () => {
+                this.scene.stop('Hud');
+                this.scene.start('Start', { ...this.settings, notice });
+            });
         }
     }
 

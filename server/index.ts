@@ -25,7 +25,7 @@ import { GameConfig } from '../src/game/config/GameConfig';
 import type { Warrior } from '../src/game/logic/Army';
 import { finalRank } from '../src/game/logic/Leaderboard';
 import type { Player } from '../src/game/logic/Player';
-import { allWarriors, secondsUntilRegroup } from '../src/game/logic/PlayerArmy';
+import { allWarriors, armySpeedMultiplier, secondsUntilRegroup } from '../src/game/logic/PlayerArmy';
 import type { Vec2 } from '../src/game/logic/Types';
 import { World, type PlayerCommand, type WorldEvents } from '../src/game/logic/World';
 import {
@@ -158,6 +158,7 @@ function broadcastSnapshot (now: number): void
             archerProgress: p.resources.archerProgress,
             clusters: p.army.clusters.length,
             regroup: secondsUntilRegroup(p.army, now, GameConfig.army),
+            speed: round1(GameConfig.movement.maxSpeed * armySpeedMultiplier(p.army, GameConfig.army)),
         };
         c.socket.send(`{"t":"snap","time":${Math.round(now)},"you":${JSON.stringify(you)},${shared}}`);
     }

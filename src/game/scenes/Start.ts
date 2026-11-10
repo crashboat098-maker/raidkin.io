@@ -94,7 +94,7 @@ export class Start extends Scene
         // dropped match shows first, in amber.
         const notice = (data as { notice?: string } | undefined)?.notice ?? null;
         const status = this.add.bitmapText(LEFT + 220, 604, PIXEL_FONT, '').setOrigin(0.5, 0).setScale(2);
-        const noticeUntil = this.time.now + 5000;
+        const noticeUntil = this.time.now + 10_000;
         const showStatus = () => {
             if (notice && this.time.now < noticeUntil) { status.setText(notice).setTint(hexToInt(Palette.accent.amber)); return; }
             const lobby = netClient.lobby;

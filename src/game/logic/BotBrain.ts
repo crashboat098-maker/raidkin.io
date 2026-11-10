@@ -57,6 +57,8 @@ export interface BotState {
     ignoreUntil: Map<string, number>;
     /** Times this bot abandoned a chase (for testing/tuning). */
     pursuitsAbandoned: number;
+    /** The army stops growing at this many soldiers (no more shards or recruits). */
+    maxSoldiers: number;
 }
 
 export interface BotSettings {
@@ -85,9 +87,10 @@ export interface BotView {
     rng: Rng;
 }
 
-export function createBotState (): BotState
+export function createBotState (maxSoldiers = Infinity): BotState
 {
     return {
+        maxSoldiers,
         mode: 'explore',
         target: null,
         targetPlayerId: null,
@@ -282,10 +285,12 @@ function decide (bot: Player, view: BotView, now: number, s: BotSettings): void
 
     // RECRUIT / GATHER. Small armies value recruits most; big armies value both.
     // Recruits: neutral Warriors and the bodies of the fallen (both join for free).
-    const recruits = view.neutrals.filter((n) => n.available).map((n) => n.position);
-    for (const body of view.bodies ?? []) recruits.push(body.position);
+    // A full army leaves them for everyone else and just roams.
+    const full = mine.length >= state.maxSoldiers;
+    const recruits = full ? [] : view.neutrals.filter((n) => n.available).map((n) => n.position);
+    if (!full) for (const body of view.bodies ?? []) recruits.push(body.position);
     const neutral = nearest(recruits.filter(safe), me, s.sightRadius * 1.2);
-    const shard = nearest(view.shards.filter((sh) => sh.active).filter(safe), me, s.sightRadius * 1.3);
+    const shard = full ? null : nearest(view.shards.filter((sh) => sh.active).filter(safe), me, s.sightRadius * 1.3);
     const neutralScore = neutral ? (mine.length < 10 ? 2.2 : 1.4) / (distance(neutral, me) + 40) : 0;
     const shardScore = shard ? 1 / (distance(shard, me) + 40) : 0;
     if (neutral && neutralScore >= shardScore)

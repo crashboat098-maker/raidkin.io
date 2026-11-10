@@ -6,12 +6,13 @@ import type { FallenBody } from '../logic/Fallen';
 import type { DefeatStats, GameWorld } from '../logic/GameWorld';
 import { NeutralForces, type NeutralWarrior } from '../logic/Neutrals';
 import { ObstacleMap } from '../logic/Obstacles';
+import { createMover, updateMover, type MoverState } from '../logic/Movement';
 import { createIdSource, type Player } from '../logic/Player';
 import { createPlayerArmy } from '../logic/PlayerArmy';
 import { createPlayerResources } from '../logic/PlayerResources';
 import { SoulShardField, type SoulShard } from '../logic/SoulShards';
-import type { Vec2 } from '../logic/Types';
-import type { WorldEvents } from '../logic/World';
+import type { Rect, Vec2 } from '../logic/Types';
+import { movementBounds, type WorldEvents } from '../logic/World';
 import type { NetClient } from './NetClient';
 import {
     JOIN_RECRUITED, NEUTRAL_AVAILABLE, NEUTRAL_FACING_LEFT, NEUTRAL_KINDS, NEUTRAL_MOVING, NEUTRAL_READY, PROTOCOL_VERSION,
@@ -36,6 +37,11 @@ const INTERPOLATION_MS = 110;
 /** Send steering at most this often (and at least this often while it changes). */
 const INPUT_INTERVAL_MS = 50;
 const INPUT_KEEPALIVE_MS = 400;
+/** Own-army prediction: how far ahead of the server's last word we aim (seconds of travel)... */
+const PREDICTION_LEAD_S = 0.12;
+/** ...how much drift is tolerated while moving, and beyond what distance we just jump (world px). */
+const MOVING_TOLERANCE = 24;
+const SNAP_DISTANCE = 220;
 
 interface Decoded {
     time: number;
@@ -87,11 +93,17 @@ export class NetWorld implements GameWorld
     private lastInputSentAt = 0;
     /** Events gathered from messages that arrived between frames (state on joining). */
     private queued: WorldEvents = emptyWorldEvents();
+    /** Our army's steering point as the server has it (interpolated like everyone else's). */
+    private readonly ownServerLead: Vec2 = { x: 0, y: 0 };
+    /** Our steering point moved locally, ahead of the server (null until we have an army). */
+    private predicted: MoverState | null = null;
+    private readonly moveBounds: Rect;
 
     constructor (private readonly config: Config, private readonly net: NetClient, name: string, color: string)
     {
         this.layout = generateBattlefield(config.world);
         this.obstacles = new ObstacleMap(this.layout.obstacles, this.layout.water, config.water.slowdown);
+        this.moveBounds = movementBounds(this.layout);
         // Same seeds as the server, so shard ids and neutral sites line up with it.
         this.shards = new SoulShardField(this.layout, config.soulShards, config.world.seed + 1);
         const forces = new NeutralForces(this.layout, this.obstacles, config.neutrals, config.world.seed + 2, createIdSource());
@@ -114,7 +126,7 @@ export class NetWorld implements GameWorld
     // GameWorld
     // -----------------------------------------------------------------------
 
-    update (now: number, _dt: number, input: Vec2, split: boolean | Vec2 | null, surrender: Vec2 | null): WorldEvents
+    update (now: number, dt: number, input: Vec2, split: boolean | Vec2 | null, surrender: Vec2 | null): WorldEvents
     {
         this.sendInput(input, split, surrender);
         const events = this.takeQueued();
@@ -126,7 +138,85 @@ export class NetWorld implements GameWorld
             this.apply(this.pending.shift()!, now, events);
         }
         this.interpolate(renderTime);
+        this.predictOwnArmy(input, dt);
         return events;
+    }
+
+    /**
+     * Your own army doesn't wait for the server: its steering point moves here
+     * at once, by the same rules (speed, walls, water) the server uses, and is
+     * gently pulled toward where the server says it is. Your soldiers are drawn
+     * shifted along with it, so the whole army answers your input instantly.
+     */
+    private predictOwnArmy (input: Vec2, dt: number): void
+    {
+        const latest = this.latestOwnLead();
+        const human = this.human;
+        const lead = human.army.lead.center.position;
+        if (!latest || human.respawnAt !== null || !this.you)
+        {
+            this.predicted = null;
+            lead.x = this.ownServerLead.x;
+            lead.y = this.ownServerLead.y;
+            return;
+        }
+        if (!this.predicted) this.predicted = createMover(latest);
+
+        const m = this.config.movement;
+        updateMover(this.predicted, input, dt, this.moveBounds, { maxSpeed: this.you.speed, acceleration: m.acceleration, deceleration: m.deceleration }, this.obstacles);
+
+        // Where the server will have us by the time it hears this input: its latest
+        // position, plus a little travel in the direction we're steering.
+        const p = this.predicted.position;
+        const length = Math.hypot(input.x, input.y);
+        const ahead = length > 0.01 ? (this.you.speed * PREDICTION_LEAD_S) / Math.max(1, length) : 0;
+        const targetX = latest.x + input.x * ahead;
+        const targetY = latest.y + input.y * ahead;
+        const errorX = targetX - p.x;
+        const errorY = targetY - p.y;
+        const error = Math.hypot(errorX, errorY);
+        if (error > SNAP_DISTANCE)
+        {
+            // Far off (teleported, or a long stall): jump there.
+            p.x = targetX;
+            p.y = targetY;
+        }
+        else if (length > 0.01)
+        {
+            // While moving, small differences are just network wobble: leave them be.
+            if (error > MOVING_TOLERANCE)
+            {
+                const fix = ((error - MOVING_TOLERANCE) * Math.min(1, dt * 2)) / error;
+                p.x += errorX * fix;
+                p.y += errorY * fix;
+            }
+        }
+        else
+        {
+            const pull = Math.min(1, dt * 4);
+            p.x += errorX * pull;
+            p.y += errorY * pull;
+        }
+
+        lead.x = p.x;
+        lead.y = p.y;
+        // Move our soldiers along with the predicted steering point.
+        const shiftX = p.x - this.ownServerLead.x;
+        const shiftY = p.y - this.ownServerLead.y;
+        if (Math.hypot(shiftX, shiftY) > SNAP_DISTANCE) return;
+        for (const w of human.army.clusters[0].cluster.warriors)
+        {
+            w.position.x += shiftX;
+            w.position.y += shiftY;
+        }
+    }
+
+    /** Our steering point in the newest snapshot received (not yet drawn). */
+    private latestOwnLead (): Vec2 | null
+    {
+        if (!this.myId) return null;
+        const newest = this.pending[this.pending.length - 1] ?? this.applied;
+        return newest?.leads.get(this.myId) ?? null;
     }
 
     splitState (): { clusters: number; regroupSeconds: number | null } | null
@@ -459,7 +549,8 @@ export class NetWorld implements GameWorld
         for (const [id, a] of this.leadFrom)
         {
             const p = this.playersById.get(id);
-            if (p) lerp(a, to?.leads.get(id), p.army.lead.center.position);
+            // Our own steering point is predicted (see predictOwnArmy); keep the server's here.
+            if (p) lerp(a, to?.leads.get(id), p === this.human ? this.ownServerLead : p.army.lead.center.position);
         }
         for (const [site, a] of this.neutralFrom)
         {

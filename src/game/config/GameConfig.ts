@@ -218,6 +218,12 @@ export const GameConfig = {
         count: 3,
         /** Soldiers each bot starts with (same as the human, for a fair match). Raise for testing big fights. */
         startingSize: 1,
+        /**
+         * Most soldiers each bot's army grows to, in bot order. With the default
+         * map seed the bots are KARWYN, VELVASH (the yellow one) and VORHELM.
+         * A full bot stops collecting shards and recruits, and just roams and fights.
+         */
+        maxSoldiers: [65, 150, 50] as readonly number[],
         /** Eliminated bots come back with this many soldiers and a fresh score. */
         respawnSize: 1,
         respawnDelayMs: 8000,
