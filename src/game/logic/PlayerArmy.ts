@@ -5,7 +5,6 @@ import {
 } from './Army';
 import { CENTER_BODY, updateMover, type MovementTuning } from './Movement';
 import { bodyRect, type ObstacleMap } from './Obstacles';
-import { createRng } from './Random';
 import type { Rect, Vec2 } from './Types';
 
 /**
@@ -43,6 +42,12 @@ export interface ArmyCluster {
     splitAt: number;
     /** Until this time the cluster rushes out to its place in the fan (0 = not launching). */
     launchUntil: number;
+    /**
+     * The direction it was split toward (unit vector; zero for the root). Its
+     * place is ahead of its parent in this direction, so splits go forward
+     * and the parent stays where it is.
+     */
+    splitDir: Vec2;
     route: FollowRoute;
     nextPlanAt: number;
     lastCheckPosition: Vec2;
@@ -85,13 +90,14 @@ const STUCK_DISTANCE = 4;
 /** Only breadcrumbs this close are considered when re-planning (keeps checks short and cheap). */
 const CRUMB_SEARCH_RADIUS = 220;
 
-function wrapCluster (cluster: Cluster, parentId: number | null, splitAt: number): ArmyCluster
+function wrapCluster (cluster: Cluster, parentId: number | null, splitAt: number, splitDir: Vec2 = { x: 0, y: 0 }): ArmyCluster
 {
     return {
         cluster,
         parentId,
         splitAt,
         launchUntil: 0,
+        splitDir,
         route: { mode: 'direct' },
         nextPlanAt: 0,
         lastCheckPosition: { ...cluster.center.position },
@@ -313,7 +319,7 @@ export function splitArmy (
         original.splitAt = now;
         if (original.parentId !== null) original.launchUntil = launchUntil;
         army.parentOf.set(newCluster.id, cluster.id);
-        const child = wrapCluster(newCluster, cluster.id, now);
+        const child = wrapCluster(newCluster, cluster.id, now, { ...forward });
         child.launchUntil = launchUntil;
         army.clusters.push(child);
         created.push({ ...leftCentre }, { ...rightCentre });
@@ -384,19 +390,40 @@ function clusterTargets (army: PlayerArmy, plan: RegroupPlan, obstacles: Obstacl
 {
     const targets = new Map<ArmyCluster, Vec2>();
     const lead = army.lead.center.position;
-    // Spots for EVERY cluster, returning ones included, so the layout doesn't
-    // shift when one heads back (otherwise the groups that stay would slide
-    // toward the middle to meet it).
-    const placed = [...army.clusters].sort((a, b) => a.cluster.id - b.cluster.id);
-    const spots = new Map<ArmyCluster, Vec2>();
-    if (placed.length > 0)
-    {
-        const biggest = Math.max(...placed.map((c) => clusterRadius(c.cluster.warriors.length, settings.formationSpacing)));
-        const offsets = clusterOffsets(placed.length, biggest * 2 + settings.split.clusterGap);
-        placed.forEach((ac, i) => spots.set(ac, freeTowardLead(lead, offsets[i], obstacles, bounds)));
-    }
+    const radius = (ac: ArmyCluster) => clusterRadius(ac.cluster.warriors.length, settings.formationSpacing);
+    const gap = settings.split.clusterGap;
 
-    for (const ac of plan.holding) targets.set(ac, spots.get(ac) ?? lead);
+    // Every cluster's place: the root on the lead; each split-off cluster just
+    // ahead of its parent, in the direction it was split toward. A split never
+    // moves the parent, and a returning cluster never moves anyone else.
+    const parents = new Map<ArmyCluster, ArmyCluster | null>();
+    for (const ac of army.clusters) parents.set(ac, findParent(army, ac));
+    const spots = new Map<ArmyCluster, Vec2>();
+    const spotOf = (ac: ArmyCluster, depth = 0): Vec2 => {
+        const known = spots.get(ac);
+        if (known) return known;
+        const parent = parents.get(ac) ?? null;
+        const dir = ac.splitDir;
+        let spot: Vec2;
+        if (!parent || depth > army.clusters.length || (dir.x === 0 && dir.y === 0)) spot = { x: lead.x, y: lead.y };
+        else
+        {
+            const base = spotOf(parent, depth + 1);
+            let reach = radius(parent) + radius(ac) + gap;
+            // Earlier siblings sent the same way: line up beyond them, not on top.
+            for (const other of army.clusters)
+            {
+                if (other === ac || parents.get(other) !== parent || other.cluster.id > ac.cluster.id) continue;
+                if (other.splitDir.x * dir.x + other.splitDir.y * dir.y > 0.7) reach += radius(other) * 2 + gap;
+            }
+            const wanted = { x: base.x + dir.x * reach, y: base.y + dir.y * reach };
+            spot = freeTowardLead(lead, { x: wanted.x - lead.x, y: wanted.y - lead.y }, obstacles, bounds);
+        }
+        spots.set(ac, spot);
+        return spot;
+    };
+
+    for (const ac of plan.holding) targets.set(ac, spotOf(ac));
 
     // Regrouping: the smaller group runs back to the bigger one, which holds its spot.
     for (const [ac, parent] of plan.returning)
@@ -404,47 +431,12 @@ function clusterTargets (army: PlayerArmy, plan: RegroupPlan, obstacles: Obstacl
         if (ac.cluster.warriors.length <= parent.cluster.warriors.length) targets.set(ac, parent.cluster.center.position);
         else
         {
-            targets.set(ac, spots.get(ac) ?? lead);
+            targets.set(ac, spotOf(ac));
             targets.set(parent, ac.cluster.center.position);
         }
     }
 
     return targets;
-}
-
-const offsetCache = new Map<string, Vec2[]>();
-
-/** Spots for `count` clusters around the lead, `spacing` apart, centred on the lead. */
-function clusterOffsets (count: number, spacing: number): Vec2[]
-{
-    const key = `${count}:${Math.round(spacing)}`;
-    const cached = offsetCache.get(key);
-    if (cached) return cached;
-
-    // A small sunflower pattern (two clusters simply stand side by side).
-    const rng = createRng(77);
-    const golden = Math.PI * (3 - Math.sqrt(5));
-    const raw: Vec2[] = [];
-    for (let i = 0; i < count; i++)
-    {
-        if (count === 2) { raw.push({ x: i === 0 ? -0.5 : 0.5, y: 0 }); continue; }
-        const r = Math.sqrt(i + 0.5);
-        raw.push({ x: Math.cos(i * golden) * r + (rng() - 0.5) * 0.05, y: Math.sin(i * golden) * r * 0.9 });
-    }
-
-    // Scale it so the closest two clusters are exactly `spacing` apart (never closer).
-    let closest = Infinity;
-    for (let i = 0; i < count; i++)
-    {
-        for (let j = i + 1; j < count; j++) closest = Math.min(closest, distance(raw[i], raw[j]));
-    }
-    const scale = Number.isFinite(closest) && closest > 0 ? spacing / closest : 0;
-
-    // Centre the pattern on the lead so the camera stays on the middle of the army.
-    const mid = { x: raw.reduce((s, p) => s + p.x, 0) / count, y: raw.reduce((s, p) => s + p.y, 0) / count };
-    const offsets = raw.map((p) => ({ x: (p.x - mid.x) * scale, y: (p.y - mid.y) * scale }));
-    offsetCache.set(key, offsets);
-    return offsets;
 }
 
 /** The lead + offset, pulled in toward the lead if that spot is inside an obstacle. */
