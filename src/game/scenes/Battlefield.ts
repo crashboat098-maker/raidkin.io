@@ -105,7 +105,7 @@ export class Battlefield extends Scene
         buildBattlefieldView(this, layout, this.seeThrough);
         buildStructureView(this, layout.structures, this.seeThrough);
         // Only the scenery near the camera is drawn (a huge saving on phones).
-        this.culler = new ViewCuller(this.children.list.slice(sceneryFrom), layout.worldWidth, layout.worldHeight);
+        this.culler = new ViewCuller(this, this.children.list.slice(sceneryFrom), layout.worldWidth, layout.worldHeight);
         this.shardView = new SoulShardView(this, this.world.shards.shards);
         this.fallenView = new FallenView(this);
         this.neutralView = new NeutralView(this, this.world.neutrals.units);

@@ -1,4 +1,4 @@
-import type { ClientMessage, LobbyMessage, ServerMessage } from './Protocol';
+import { decodeSnapshot, type ClientMessage, type LobbyMessage, type ServerMessage } from './Protocol';
 
 /**
  * The connection to the game server, opened as soon as the page loads and
@@ -39,8 +39,16 @@ export class NetClient
         try { socket = new WebSocket(this.url); }
         catch { this.retry(); return; }
         this.socket = socket;
+        socket.binaryType = 'arraybuffer';
         socket.onopen = () => { this.status = 'online'; };
         socket.onmessage = (e) => {
+            // Snapshots come packed as binary; everything else is JSON.
+            if (e.data instanceof ArrayBuffer)
+            {
+                const snapshot = decodeSnapshot(e.data);
+                if (snapshot) this.listener?.(snapshot);
+                return;
+            }
             if (typeof e.data !== 'string') return;
             let message: ServerMessage;
             try { message = JSON.parse(e.data) as ServerMessage; }

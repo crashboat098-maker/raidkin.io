@@ -13,7 +13,7 @@ import { finalRank } from './Leaderboard';
 import { allWarriors, nearestCluster, secondsUntilRegroup, splitArmy, totalSoldiers, updatePlayerArmy } from './PlayerArmy';
 import { applyGreenShards, applySoulShards, createPlayerResources } from './PlayerResources';
 import { createRng, type Rng } from './Random';
-import { SoulShardField, type SoulShard } from './SoulShards';
+import { boxAround, SoulShardField, type SoulShard } from './SoulShards';
 import type { Rect, Vec2 } from './Types';
 
 /**
@@ -88,6 +88,8 @@ export interface PlayerCommand {
 
 /** Soldiers left behind by a player who quit can be collected after this short pause (ms). */
 const LEFT_ARMY_GRACE_MS = 1000;
+/** An army wiped out by lava (or surrendering) still counts as a kill for whoever hit it this recently. */
+const KILL_CREDIT_MS = 10_000;
 
 const IDLE_COMMAND: PlayerCommand = { move: { x: 0, y: 0 }, split: null, surrender: null };
 
@@ -164,6 +166,8 @@ export class World implements GameWorld
     }
 
     private nextHumanId = 1;
+    /** Who last damaged each army (credited with the kill if the army is wiped out). */
+    private readonly lastHitBy = new Map<Player, { by: Player; at: number }>();
 
     /** Someone joins (online) at time `now`: a new one-soldier army far from everyone else. */
     addHuman (name: string, colorId: string, now: number): Player
@@ -186,6 +190,8 @@ export class World implements GameWorld
     {
         const index = this.players.indexOf(p);
         if (index >= 0) this.players.splice(index, 1);
+        this.lastHitBy.delete(p);
+        for (const [victim, hit] of this.lastHitBy) if (hit.by === p) this.lastHitBy.delete(victim);
         if (!this.isAlive(p)) return [];
 
         const released: { warrior: Warrior; neutral: NeutralWarrior }[] = [];
@@ -321,9 +327,18 @@ export class World implements GameWorld
         {
             events.bodiesFallen.push(this.fallen.add(d.warrior.position, d.owner.colorId, d.warrior.facing < 0 ? -1 : 1, now, d.warrior.role));
         }
+        for (const h of events.hits) this.lastHitBy.set(h.targetOwner, { by: h.attackerOwner, at: now });
         for (const p of living)
         {
             if (totalSoldiers(p.army) > 0) continue;
+            // A kill is a whole army wiped out. It goes to whoever struck the final blow;
+            // if lava or a surrender took the last soldier, to whoever hit them in the last few seconds.
+            let killer: Player | null = null;
+            for (const d of events.deaths) if (d.owner === p && d.killer) killer = d.killer;
+            const recent = this.lastHitBy.get(p);
+            if (!killer && recent && now - recent.at <= KILL_CREDIT_MS) killer = recent.by;
+            if (killer && killer !== p) killer.kills += 1;
+            this.lastHitBy.delete(p);
             // Bots come back after a delay; the human is defeated for good (defeat screen).
             p.respawnAt = p.kind === 'bot' ? now + c.bots.respawnDelayMs : Infinity;
             p.stats.defeatedAt = now;
@@ -342,9 +357,13 @@ export class World implements GameWorld
             if (this.roomToGrow(p) <= 0) continue;
             let blue = 0;
             let green = 0;
-            for (const w of allWarriors(p.army))
+            const warriors = allWarriors(p.army);
+            // Only the shards around this army can be reached (same result, far less checking).
+            const box = boxAround(warriors);
+            const nearby = box ? this.shards.activeNear(box) : [];
+            if (nearby.length > 0) for (const w of warriors)
             {
-                const got = this.shards.collectAt(w.position, now);
+                const got = this.shards.collectAt(w.position, now, nearby);
                 for (const s of got) { if (s.kind === 'green') green++; else blue++; }
                 events.shardsCollected.push(...got);
             }
@@ -364,6 +383,9 @@ export class World implements GameWorld
         //    out of play the moment it is recruited, so it can only ever join once.
         for (const p of stillAlive)
         {
+            // Nothing to recruit anywhere near this army: skip checking each soldier.
+            const box = boxAround(allWarriors(p.army));
+            if (!box || !this.neutrals.anyRecruitableNear(box, now)) continue;
             for (const soldier of [...allWarriors(p.army)])
             {
                 const room = this.roomToGrow(p);

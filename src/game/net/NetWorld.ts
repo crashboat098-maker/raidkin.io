@@ -17,7 +17,7 @@ import type { NetClient } from './NetClient';
 import {
     JOIN_RECRUITED, NEUTRAL_AVAILABLE, NEUTRAL_FACING_LEFT, NEUTRAL_KINDS, NEUTRAL_MOVING, NEUTRAL_READY, PROTOCOL_VERSION,
     WARRIOR_ARCHER, WARRIOR_BURNING, WARRIOR_FACING_LEFT, WARRIOR_MOVING,
-    type BodyRow, type DefeatMessage, type ServerMessage, type SnapshotMessage, type StateMessage, type YouRow,
+    type BodyRow, type DefeatMessage, type RosterRow, type ServerMessage, type SnapPlayer, type SnapshotMessage, type StateMessage, type YouRow,
 } from './Protocol';
 
 type Config = typeof GameConfigType;
@@ -47,6 +47,8 @@ interface Decoded {
     time: number;
     you: YouRow | null;
     message: SnapshotMessage;
+    /** Each army in the snapshot with its roster row (name, colour...). */
+    armies: { info: RosterRow; row: SnapPlayer }[];
     warriors: Map<number, { x: number; y: number }>;
     leads: Map<string, { x: number; y: number }>;
     neutrals: Map<number, { x: number; y: number }>;
@@ -77,6 +79,8 @@ export class NetWorld implements GameWorld
     refused: 'version' | 'full' | null = null;
 
     private myId: string | null = null;
+    /** Names, colours and kills by snapshot number (the server resends it when it changes). */
+    private readonly roster = new Map<number, RosterRow>();
     private readonly playersById = new Map<string, Player>();
     private readonly leadFrom = new Map<string, Vec2>();
     private readonly warriors = new Map<number, Tracked>();
@@ -256,6 +260,10 @@ export class NetWorld implements GameWorld
                 return;
             case 'error': this.refused = m.reason; return;
             case 'lobby': return;
+            case 'roster':
+                this.roster.clear();
+                for (const row of m.players) this.roster.set(row[0], row);
+                return;
         }
     }
 
@@ -291,15 +299,20 @@ export class NetWorld implements GameWorld
 
         const warriors = new Map<number, { x: number; y: number }>();
         const leads = new Map<string, { x: number; y: number }>();
+        // Match each army to its roster row now (the roster may change before this snapshot is shown).
+        const armies: Decoded['armies'] = [];
         for (const row of m.players)
         {
-            leads.set(row[0], { x: row[7], y: row[8] });
-            const list = row[12];
+            const info = this.roster.get(row.net);
+            if (!info) continue;
+            armies.push({ info, row });
+            leads.set(info[1], { x: row.leadX, y: row.leadY });
+            const list = row.warriors;
             for (let i = 0; i < list.length; i += 5) warriors.set(list[i], { x: list[i + 1], y: list[i + 2] });
         }
         const neutrals = new Map<number, { x: number; y: number }>();
         for (let i = 0; i < m.neutrals.length; i += 5) neutrals.set(m.neutrals[i], { x: m.neutrals[i + 2], y: m.neutrals[i + 3] });
-        this.pending.push({ time: m.time, you: m.you, message: m, warriors, leads, neutrals });
+        this.pending.push({ time: m.time, you: m.you, message: m, armies, warriors, leads, neutrals });
         // Never fall far behind: drop old snapshots if many pile up (e.g. a background tab).
         while (this.pending.length > 30) this.apply(this.pending.shift()!, performance.now(), this.queued);
     }
@@ -335,9 +348,10 @@ export class NetWorld implements GameWorld
 
         // Players: create newcomers, update everyone, drop those who left.
         const present = new Set<string>();
-        for (const row of m.players)
+        for (const { info, row } of snap.armies)
         {
-            const [id, name, color, kind, alive, kills, peak, leadX, leadY, headingX, headingY, rep] = row;
+            const [, id, name, color, kind, kills, peak] = info;
+            const { alive, leadX, leadY, headingX, headingY, rep, size } = row;
             present.add(id);
             let p = this.playersById.get(id);
             if (!p)
@@ -352,6 +366,8 @@ export class NetWorld implements GameWorld
             p.kills = kills;
             p.stats.peakArmy = peak;
             p.army.representativeId = rep >= 0 ? rep : null;
+            // Only soldiers near our view arrive, so the real size comes separately.
+            p.army.reportedSize = alive ? size : 0;
             p.army.lead.heading.x = headingX;
             p.army.lead.heading.y = headingY;
             this.leadFrom.set(id, { x: leadX, y: leadY });
@@ -381,11 +397,11 @@ export class NetWorld implements GameWorld
         for (let i = 0; i < e.surrendered.length; i += 2) surrenderedAs.set(e.surrendered[i], e.surrendered[i + 1]);
 
         const seen = new Set<number>();
-        for (const row of m.players)
+        for (const { info, row } of snap.armies)
         {
-            const owner = this.playersById.get(row[0])!;
+            const owner = this.playersById.get(info[1])!;
             const soldiers: Warrior[] = [];
-            const list = row[12];
+            const list = row.warriors;
             for (let i = 0; i < list.length; i += 5)
             {
                 const id = list[i];

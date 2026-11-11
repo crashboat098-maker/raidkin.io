@@ -64,6 +64,11 @@ export interface PlayerArmy {
     lastSplitAt: number;
     /** The soldier wearing the amber marker (cosmetic only). */
     representativeId: number | null;
+    /**
+     * Online only: the army's real size, as the server reports it. The browser
+     * only gets the soldiers near its own view, so counting them would be wrong.
+     */
+    reportedSize?: number;
 }
 
 export interface PlayerArmySettings extends ClusterSettings {
@@ -129,6 +134,7 @@ export function allWarriors (army: PlayerArmy): Warrior[]
 
 export function totalSoldiers (army: PlayerArmy): number
 {
+    if (army.reportedSize !== undefined) return army.reportedSize;
     return army.clusters.reduce((sum, c) => sum + c.cluster.warriors.length, 0);
 }
 

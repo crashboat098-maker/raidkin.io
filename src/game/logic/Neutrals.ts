@@ -155,6 +155,14 @@ export class NeutralForces
      * Recruit available neutrals within range of `position`, closest first,
      * up to `maxCount`. Those that don't fit stay where they are.
      */
+    /** True if some neutral that can be recruited now is within recruiting range of `box`. */
+    anyRecruitableNear (box: { minX: number; minY: number; maxX: number; maxY: number }, now: number): boolean
+    {
+        const r = this.settings.recruitRange;
+        return this.units.some((u) => u.available && now >= u.recruitableAt
+            && u.position.x >= box.minX - r && u.position.x <= box.maxX + r && u.position.y >= box.minY - r && u.position.y <= box.maxY + r);
+    }
+
     recruitNear (position: Vec2, maxCount: number, now: number): NeutralWarrior[]
     {
         if (maxCount <= 0) return [];
