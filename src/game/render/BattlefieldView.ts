@@ -13,6 +13,7 @@ import { hexToInt, Palette } from './Palette';
 import { Tex } from './PlaceholderArt';
 import type { SeeThroughGroup } from './SeeThrough';
 import { addTrails } from './TrailView';
+import { bakeFlatDecorations } from './GroundBake';
 
 /**
  * Draws the battlefield described by a BattlefieldLayout.
@@ -29,6 +30,8 @@ export const Depth = {
     /** Water sits under the trails, so the bridges drawn with them cross over it. */
     Water: -999_999.5,
     Trails: -999_999,
+    /** Flat decorations baked into the ground (pebbles, flowers, tree shadows...). */
+    FlatDecorations: -999_998,
     Wisps: 900_000,
     Overlay: 1_000_000,
 } as const;
@@ -125,6 +128,9 @@ const SHADOW_WIDTH: Partial<Record<DecorationKind, number>> = {
 /** Tall things that turn see-through when your soldiers walk behind them. */
 const SEE_THROUGH_KINDS = new Set<DecorationKind>(['largeTree', 'pine', 'deadTree', 'elderTree', 'birch', 'willow', 'giantShroom', 'charredTree', 'moonTree', 'spiralTree', 'goldenOak', 'cypress', 'twistedYew', 'gothicRuin', 'scorchedTree', 'swampTree']);
 
+/** Things lying flat on the ground: soldiers walk over them, never behind them, so they're baked into the ground. */
+const FLAT_KINDS = new Set<DecorationKind>(['rockSmall', 'pebbles', 'flowers', 'bones', 'fairyRing', 'lilyPad']);
+
 export function buildBattlefieldView (scene: Scene, layout: BattlefieldLayout, seeThrough: SeeThroughGroup): void
 {
     buildGround(scene, layout);
@@ -137,10 +143,12 @@ export function buildBattlefieldView (scene: Scene, layout: BattlefieldLayout, s
     addWater(scene, layout.water, layout.worldWidth, layout.worldHeight, Depth.Water, biomes ? (x, y) => swampAt(biomes, x, y) : undefined);
     addTrails(scene, layout, Depth.Trails);
 
+    const flat: GameObjects.Image[] = [];
     for (const decoration of layout.decorations)
     {
-        addDecoration(scene, decoration, seeThrough);
+        addDecoration(scene, decoration, seeThrough, flat);
     }
+    bakeFlatDecorations(scene, flat, layout.worldWidth, layout.worldHeight, Depth.FlatDecorations);
 }
 
 /**
@@ -180,7 +188,7 @@ function buildGround (scene: Scene, layout: BattlefieldLayout): void
     map.createLayer(0, tileset, 0, 0)?.setDepth(Depth.Ground);
 }
 
-function addDecoration (scene: Scene, d: Decoration, seeThrough: SeeThroughGroup): void
+function addDecoration (scene: Scene, d: Decoration, seeThrough: SeeThroughGroup, flat: GameObjects.Image[]): void
 {
     const accent: Accent = d.accent ?? 'green';
 
@@ -205,14 +213,15 @@ function addDecoration (scene: Scene, d: Decoration, seeThrough: SeeThroughGroup
             const shadowWidth = SHADOW_WIDTH[d.kind];
             if (shadowWidth)
             {
-                scene.add.image(d.x, d.y - 1, Tex.Shadow)
+                flat.push(scene.add.image(d.x, d.y - 1, Tex.Shadow)
                     .setDisplaySize(shadowWidth, 6)
                     .setAlpha(0.7)
-                    .setDepth(d.y - 0.5);
+                    .setDepth(d.y - 0.5));
             }
 
             const sprite = addSprite(scene, TEXTURE_FOR[d.kind](d.variant), d);
-            if (SEE_THROUGH_KINDS.has(d.kind))
+            if (FLAT_KINDS.has(d.kind)) flat.push(sprite);
+            else if (SEE_THROUGH_KINDS.has(d.kind))
             {
                 seeThrough.add(sprite, d.x, d.y, sprite.width, sprite.height);
             }

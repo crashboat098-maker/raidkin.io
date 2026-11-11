@@ -255,7 +255,6 @@ export function removeDead (players: readonly Player[], hits: readonly Hit[]): D
             {
                 if (w.hp > 0) continue;
                 const killer = killerOf.get(w) ?? null;
-                if (killer) killer.kills += 1;
                 deaths.push({ warrior: w, owner, killer });
             }
             cluster.warriors = cluster.warriors.filter((w) => w.hp > 0);

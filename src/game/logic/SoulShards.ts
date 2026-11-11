@@ -2,6 +2,24 @@ import type { BattlefieldLayout } from './BattlefieldLayout';
 import { createRng, randRange, type Rng } from './Random';
 import type { Vec2 } from './Types';
 
+/** An axis-aligned area, e.g. around an army. */
+export interface Box { minX: number; minY: number; maxX: number; maxY: number }
+
+/** The smallest box around some points (null for none). */
+export function boxAround (points: readonly { position: Vec2 }[]): Box | null
+{
+    if (points.length === 0) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const { position: p } of points)
+    {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+    }
+    return { minX, minY, maxX, maxY };
+}
+
 /**
  * Soul Shards: the collectible resource.
  *
@@ -68,13 +86,13 @@ export class SoulShardField
      * Collect every active shard touching `position`.
      * Returns the shards collected this call (usually none, sometimes one).
      */
-    collectAt (position: Vec2, now: number): SoulShard[]
+    collectAt (position: Vec2, now: number, candidates: readonly SoulShard[] = this.shards): SoulShard[]
     {
         const collected: SoulShard[] = [];
         const radiusSquared = this.settings.pickupRadius ** 2;
         const { min, max } = this.settings.respawnDelayMs;
 
-        for (const shard of this.shards)
+        for (const shard of candidates)
         {
             if (!shard.active) continue;
 
@@ -89,6 +107,17 @@ export class SoulShardField
         }
 
         return collected;
+    }
+
+    /**
+     * The active shards close enough to `box` that something inside it could
+     * pick them up (in id order, like `shards`). Lets a big army check only the
+     * few shards around it instead of every shard on the map.
+     */
+    activeNear (box: Box): SoulShard[]
+    {
+        const r = this.settings.pickupRadius;
+        return this.shards.filter((s) => s.active && s.x >= box.minX - r && s.x <= box.maxX + r && s.y >= box.minY - r && s.y <= box.maxY + r);
     }
 
     /**

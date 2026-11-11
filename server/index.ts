@@ -29,8 +29,8 @@ import { allWarriors, armySpeedMultiplier, secondsUntilRegroup } from '../src/ga
 import type { Vec2 } from '../src/game/logic/Types';
 import { World, type PlayerCommand, type WorldEvents } from '../src/game/logic/World';
 import {
-    cleanDirection, emptyEvents, encodeBody, encodeNeutral, encodePlayer, JOIN_RECRUITED, JOIN_SUMMONED, PROTOCOL_VERSION, round1,
-    type ClientMessage, type EventRows, type ServerMessage, type SnapshotMessage,
+    cleanDirection, emptyEvents, encodeBody, encodeSnapshot, JOIN_RECRUITED, JOIN_SUMMONED, PROTOCOL_VERSION, rosterRow, round1,
+    type ClientMessage, type EventRows, type ServerMessage, type SnapshotArmy, type YouRow,
 } from '../src/game/net/Protocol';
 import { ARMY_COLORS, type ArmyColor } from '../src/game/render/Palette';
 import { sanitizeName } from '../src/game/scenes/PlayerSettings';
@@ -44,6 +44,15 @@ const SNAPSHOT_EVERY = 2;
 /** Messages a connection may send per second before it's dropped. */
 const MAX_MESSAGES_PER_SECOND = 120;
 const BOT_COLORS: ArmyColor[] = ['azure', 'gold', 'violet', 'ember'];
+/**
+ * Other armies' soldiers are only sent near what a player can see. The camera
+ * never shows more than the screen size in world pixels (zoom is never below
+ * 1), plus this margin for camera lag, movement between snapshots and sprites
+ * poking in from the edge.
+ */
+const VIEW_HALF_WIDTH = GameConfig.screen.width / 2;
+const VIEW_HALF_HEIGHT = GameConfig.screen.height / 2;
+const VIEW_MARGIN = 400;
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const STATIC_DIR = resolve(here, '..', '..', 'dist');
@@ -70,6 +79,23 @@ interface Client {
     player: Player | null;
     command: PlayerCommand;
     messagesThisSecond: number;
+    /** The roster as last sent to this client (resent only when it changes). */
+    rosterSent: string;
+}
+
+/** Small numbers for players in snapshots (stable for as long as the player exists). */
+const netIds = new WeakMap<Player, number>();
+let nextNetId = 1;
+function netIdOf (p: Player): number
+{
+    let id = netIds.get(p);
+    if (id === undefined)
+    {
+        id = nextNetId;
+        nextNetId = nextNetId >= 65535 ? 1 : nextNetId + 1;
+        netIds.set(p, id);
+    }
+    return id;
 }
 const clients = new Set<Client>();
 let pending: EventRows = emptyEvents();
@@ -151,19 +177,36 @@ function step (): void
 
 function broadcastSnapshot (now: number): void
 {
-    const players = world.players.map((p) => encodePlayer(p, p.respawnAt === null ? allWarriors(p.army) : ([] as Warrior[]), now));
-    const neutrals: number[] = [];
-    for (const u of world.neutrals.units) encodeNeutral(u, now, neutrals);
     const events = pending;
     pending = emptyEvents();
+    const armies = world.players.map((p) => {
+        const warriors = p.respawnAt === null ? allWarriors(p.army) : ([] as Warrior[]);
+        return { net: netIdOf(p), player: p, warriors, size: warriors.length };
+    });
+    // Names, colours and kills go out only when they change (not 15 times a second).
+    const roster = JSON.stringify({ t: 'roster', players: armies.map((a) => rosterRow(a.net, a.player)) });
 
-    // Everything but the HUD numbers is the same for everyone, so encode it once.
-    const shared = JSON.stringify({ players, neutrals, events }).slice(1, -1);
     for (const c of clients)
     {
         if (!c.player || c.socket.readyState !== c.socket.OPEN) continue;
+        if (c.rosterSent !== roster)
+        {
+            c.socket.send(roster);
+            c.rosterSent = roster;
+        }
         const p = c.player;
-        const you: SnapshotMessage['you'] = {
+        const view = viewBox(p);
+        // Your own army in full; everyone else's soldiers only near your view.
+        const sent: SnapshotArmy[] = armies.map((a) => a.player === p ? a : { ...a, warriors: a.warriors.filter((w) => inBox(view, w.position)) });
+        const sentIds = new Set<number>();
+        for (const a of sent) for (const w of a.warriors) sentIds.add(w.id);
+        // Strikes between soldiers you can't see would only be thrown away.
+        const hits: number[] = [];
+        for (let i = 0; i < events.hits.length; i += 3)
+        {
+            if (sentIds.has(events.hits[i]) || sentIds.has(events.hits[i + 1])) hits.push(events.hits[i], events.hits[i + 1], events.hits[i + 2]);
+        }
+        const you: YouRow = {
             soulShards: p.resources.soulShards,
             recruitProgress: p.resources.recruitProgress,
             archerProgress: p.resources.archerProgress,
@@ -171,8 +214,34 @@ function broadcastSnapshot (now: number): void
             regroup: secondsUntilRegroup(p.army, now, GameConfig.army),
             speed: round1(GameConfig.movement.maxSpeed * armySpeedMultiplier(p.army, GameConfig.army)),
         };
-        c.socket.send(`{"t":"snap","time":${Math.round(now)},"you":${JSON.stringify(you)},${shared}}`);
+        c.socket.send(encodeSnapshot(now, you, { ...events, hits }, sent, world.neutrals.units, now));
     }
+}
+
+interface Box { minX: number; minY: number; maxX: number; maxY: number }
+
+/**
+ * Everything the player's camera could be showing. The camera follows the
+ * army's steering point but stops at the map edges, so its centre is between
+ * that point and the same point kept a half-screen from the edges.
+ */
+function viewBox (p: Player): Box
+{
+    const lead = p.army.lead.center.position;
+    const { worldWidth, worldHeight } = world.layout;
+    const clampedX = Math.max(VIEW_HALF_WIDTH, Math.min(worldWidth - VIEW_HALF_WIDTH, lead.x));
+    const clampedY = Math.max(VIEW_HALF_HEIGHT, Math.min(worldHeight - VIEW_HALF_HEIGHT, lead.y));
+    return {
+        minX: Math.min(lead.x, clampedX) - VIEW_HALF_WIDTH - VIEW_MARGIN,
+        maxX: Math.max(lead.x, clampedX) + VIEW_HALF_WIDTH + VIEW_MARGIN,
+        minY: Math.min(lead.y, clampedY) - VIEW_HALF_HEIGHT - VIEW_MARGIN,
+        maxY: Math.max(lead.y, clampedY) + VIEW_HALF_HEIGHT + VIEW_MARGIN,
+    };
+}
+
+function inBox (box: Box, at: Vec2): boolean
+{
+    return at.x >= box.minX && at.x <= box.maxX && at.y >= box.minY && at.y <= box.maxY;
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +264,8 @@ function joinGame (client: Client, name: unknown, color: unknown): void
     }
     client.player = world.addHuman(cleanName, cleanColor, now);
     client.command = { move: { x: 0, y: 0 }, split: null, surrender: null };
+    // The page builds a fresh match view: it needs the roster again.
+    client.rosterSent = '';
 
     send(client, { t: 'joined', id: client.player.id });
     const shards: number[] = [];
@@ -298,7 +369,7 @@ const wss = new WebSocketServer({
 });
 
 wss.on('connection', (socket) => {
-    const client: Client = { socket, player: null, command: { move: { x: 0, y: 0 }, split: null, surrender: null }, messagesThisSecond: 0 };
+    const client: Client = { socket, player: null, command: { move: { x: 0, y: 0 }, split: null, surrender: null }, messagesThisSecond: 0, rosterSent: '' };
     clients.add(client);
     broadcastLobby();
 
