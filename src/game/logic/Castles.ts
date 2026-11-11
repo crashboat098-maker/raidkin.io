@@ -14,6 +14,11 @@ import type { Vec2 } from './Types';
  *             is away, and only then can someone else start their own.
  *   OWNED     3 Guardians at once, then 1 every 10 s while the owner keeps
  *             soldiers in the circle and nobody else is in it, up to 40.
+ *             Left unguarded (no owner soldiers in the circle), another army
+ *             standing alone in it takes it over by the same 30 s capture,
+ *             starting a fresh cycle for the new owner. The owner coming
+ *             back (or a third army) pauses the takeover; it drains away
+ *             once the challenger leaves.
  *   COOLDOWN  after the 40th Guardian: 60 s, then neutral again (anyone,
  *             the old owner too, can take it).
  *
@@ -45,7 +50,7 @@ export interface CastleStatus {
     site: CastleSite;
     state: CastleState;
     owner: Player | null;
-    /** Who is building up capture progress (neutral castles only). */
+    /** Who is building up capture progress (a neutral castle, or an owned one left unguarded). */
     capturer: Player | null;
     /** Capture progress, 0..1. */
     progress: number;
@@ -152,9 +157,18 @@ export class CastleField
             if (c.state === 'owned' && c.owner)
             {
                 const ownerIn = present.includes(c.owner);
-                const others = present.some((p) => p !== c.owner);
-                c.contested = others;
-                if (!ownerIn || others) { c.nextGuardianMs = null; return; }
+                const others = present.filter((p) => p !== c.owner);
+                c.contested = others.length > 0 && (ownerIn || others.length > 1);
+                if (!ownerIn || others.length > 0)
+                {
+                    c.nextGuardianMs = null;
+                    // Unguarded: another army alone in the circle takes it over, like a neutral castle.
+                    if (!ownerIn && others.length === 1) this.buildCapture(c, others[0], ms, events);
+                    else if (!c.contested) this.drainCapture(c, ms);
+                    return;
+                }
+                // The owner is back and alone: any takeover attempt fades.
+                this.drainCapture(c, ms);
                 // Production: the countdown carries over pauses (it resumes where it stopped).
                 const left = (c.nextGuardianMs ?? this.pausedLeft.get(c) ?? s.guardianEveryMs) - ms;
                 if (left > 0) { c.nextGuardianMs = left; this.pausedLeft.set(c, left); return; }
@@ -167,25 +181,33 @@ export class CastleField
             // Neutral: capture.
             c.contested = present.length > 1;
             c.nextGuardianMs = null;
-            if (present.length === 1)
-            {
-                const p = present[0];
-                if (!c.capturer || c.capturer === p)
-                {
-                    c.capturer = p;
-                    c.progress = Math.min(1, c.progress + ms / s.captureMs);
-                    if (c.progress >= 1) this.capture(c, p, events);
-                    return;
-                }
-            }
-            // Contested: paused. Otherwise (empty, or a newcomer while someone else's
-            // progress is still there): the capturer's progress drains away.
-            if (present.length > 1 || !c.capturer) return;
-            c.progress = Math.max(0, c.progress - (ms / s.captureMs) * s.decayRate);
-            if (c.progress === 0) c.capturer = null;
+            if (present.length === 1) this.buildCapture(c, present[0], ms, events);
+            // Contested: paused. Otherwise (empty): the capturer's progress drains away.
+            else if (present.length === 0) this.drainCapture(c, ms);
         });
 
         return events;
+    }
+
+    /**
+     * `p` stands alone in the circle: its capture progress builds, and at 100%
+     * the castle is theirs. A newcomer while someone else's progress is still
+     * there has to wait for it to drain away first.
+     */
+    private buildCapture (c: CastleStatus, p: Player, ms: number, events: CastleEvents): void
+    {
+        if (c.capturer && c.capturer !== p) { this.drainCapture(c, ms); return; }
+        c.capturer = p;
+        c.progress = Math.min(1, c.progress + ms / this.settings.captureMs);
+        if (c.progress >= 1) this.capture(c, p, events);
+    }
+
+    /** Nobody is taking the castle right now: the capturer's progress drains away. */
+    private drainCapture (c: CastleStatus, ms: number): void
+    {
+        if (!c.capturer) return;
+        c.progress = Math.max(0, c.progress - (ms / this.settings.captureMs) * this.settings.decayRate);
+        if (c.progress === 0) c.capturer = null;
     }
 
     /** The Guardian countdown, kept while production is paused. */
@@ -196,7 +218,8 @@ export class CastleField
         c.state = 'owned';
         c.owner = p;
         c.capturer = null;
-        c.progress = 1;
+        c.progress = 0; // while owned, progress is a takeover attempt
+        c.cooldownMs = 0;
         c.awarded = 0;
         c.contested = false;
         this.pausedLeft.set(c, this.settings.guardianEveryMs);
