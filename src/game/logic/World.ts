@@ -429,8 +429,10 @@ export class World implements GameWorld
         for (const p of stillAlive) p.stats.peakArmy = Math.max(p.stats.peakArmy, totalSoldiers(p.army));
 
         // 8. Respawns of shards and neutrals, away from every army.
-        const everySoldier = stillAlive.flatMap((p) => allWarriors(p.army).map((w) => w.position));
-        events.shardsRespawned = this.shards.update(now, everySoldier);
+        // (Every soldier's position is only gathered on the rare frames a shard is due back.)
+        events.shardsRespawned = this.shards.respawnDue(now)
+            ? this.shards.update(now, stillAlive.flatMap((p) => allWarriors(p.army).map((w) => w.position)))
+            : [];
         events.neutralsRespawned = this.neutrals.update(now, dt, this.obstacles, stillAlive.map((p) => p.army.lead.center.position));
 
         return events;

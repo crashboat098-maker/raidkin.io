@@ -120,6 +120,13 @@ export class SoulShardField
         return this.shards.filter((s) => s.active && s.x >= box.minX - r && s.x <= box.maxX + r && s.y >= box.minY - r && s.y <= box.maxY + r);
     }
 
+    /** Is any collected shard due to reappear? */
+    respawnDue (now: number): boolean
+    {
+        for (const shard of this.shards) if (!shard.active && now >= shard.respawnAt) return true;
+        return false;
+    }
+
     /**
      * Bring back shards whose respawn time has passed, at a new location
      * away from `players`. Returns the shards that reappeared this call.

@@ -251,7 +251,9 @@ export class CombatEffects
         if (reused) return reused;
 
         const image = this.scene.add.image(0, 0, TEXTURE[kind]).setDepth(DEPTH);
-        if (kind === 'flash') image.setTint(hexToInt(Palette.hit)).setBlendMode(BlendModes.ADD);
+        // Hit flashes (additive) all draw just above the other effects instead of mixed in
+        // among them: every switch between blend modes costs a separate draw call.
+        if (kind === 'flash') image.setTint(hexToInt(Palette.hit)).setBlendMode(BlendModes.ADD).setDepth(DEPTH + 0.5);
         return image;
     }
 

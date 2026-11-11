@@ -246,7 +246,8 @@ function addWisp (scene: Scene, d: Decoration, accent: Accent): void
         .setBlendMode(BlendModes.ADD)
         .setScale(0.6)
         .setAlpha(0.5)
-        .setDepth(Depth.Wisps);
+        // Over its core as before; all wisp glows together, so they batch (see Glow.ts).
+        .setDepth(Depth.Wisps + 0.5);
 
     scene.tweens.add({
         targets: [core, glow],

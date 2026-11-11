@@ -349,7 +349,9 @@ export class ArmyLabels
 
             // Just above the army's topmost soldier.
             const lead = p.army.lead.center.position;
-            const top = Math.min(...warriors.map((w) => w.position.y));
+            // (A loop, not Math.min(...spread): a huge army would overflow the argument limit.)
+            let top = Infinity;
+            for (const w of warriors) if (w.position.y < top) top = w.position.y;
             label.setPosition(Math.round(lead.x), Math.round(top) - 18);
         }
     }

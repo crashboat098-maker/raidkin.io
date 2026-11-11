@@ -1,5 +1,6 @@
 import { BlendModes, GameObjects, Scene } from 'phaser';
 import type { SoulShard } from '../logic/SoulShards';
+import { LIGHTS_DEPTH } from './Glow';
 import { hexToInt, Palette } from './Palette';
 import { Tex } from './PlaceholderArt';
 import { Depth } from './BattlefieldView';
@@ -128,7 +129,7 @@ export class SoulShardView
     private placeAt (sprites: ShardSprites, shard: SoulShard): void
     {
         sprites.shadow.setPosition(shard.x, shard.y).setDepth(shard.y - 0.2);
-        sprites.glow.setPosition(shard.x, shard.y - 7).setDepth(shard.y + 0.1);
+        sprites.glow.setPosition(shard.x, shard.y - 7).setDepth(LIGHTS_DEPTH); // with the other lights (see Glow.ts)
         sprites.crystal.setPosition(shard.x, shard.y - 2).setDepth(shard.y);
     }
 

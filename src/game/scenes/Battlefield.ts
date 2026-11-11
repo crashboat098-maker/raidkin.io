@@ -20,6 +20,7 @@ import { ensurePixelFont } from '../render/PixelFont';
 import { createPlaceholderTextures, Tex } from '../render/PlaceholderArt';
 import { SeeThroughGroup } from '../render/SeeThrough';
 import { SoulShardView } from '../render/SoulShardView';
+import { packTextures } from '../render/TextureAtlas';
 import { buildStructureView } from '../render/StructureView';
 import { ViewCuller } from '../render/ViewCuller';
 import { ArmyLabels, ArmyMarkers, ArmyView, LeaderCrown, NeutralView, playJoinEffect, type WaterFx } from '../render/UnitViews';
@@ -118,6 +119,8 @@ export class Battlefield extends Scene
         this.combatEffects = new CombatEffects(this);
         this.armyLabels = new ArmyLabels(this);
         this.crown = new LeaderCrown(this);
+        // All the art now exists: share it out of atlas pages so sprites batch together.
+        packTextures(this.game);
 
         // 4. Input.
         this.controls = new KeyboardControls(this);

@@ -609,11 +609,14 @@ function separation (warrior: Warrior, others: readonly Warrior[] | null, minDis
 {
     let px = 0;
     let py = 0;
+    const minSquared = minDistance * minDistance;
 
     const pushFrom = (other: Warrior) => {
         if (other === warrior) return;
         const dx = warrior.position.x - other.position.x;
         const dy = warrior.position.y - other.position.y;
+        // Most neighbours are out of range: skip the square root for them.
+        if (dx * dx + dy * dy >= minSquared) return;
         const d = Math.hypot(dx, dy);
         if (d >= minDistance) return;
         if (d < 0.01)

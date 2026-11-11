@@ -19,6 +19,8 @@ const CELL = 64;
 const MARGIN = 96;
 /** Objects bigger than this (half-size, px) are always drawn. */
 const MAX_HALF_EXTENT = 160;
+/** Depth nudge per object, to keep ties in their original order (see the constructor). */
+const TIE_BREAK = 1e-7;
 
 type Cullable = GameObjects.GameObject & GameObjects.Components.Visible & { getBounds?: () => { centerX: number; centerY: number; width: number; height: number }; x: number; y: number };
 
@@ -75,8 +77,17 @@ export class ViewCuller
             tween.pause();
         }
         for (const o of this.all) o.setVisible(false);
-        // Pull them all off the draw list in one pass (one by one would be slow at this size).
+        // Phaser breaks depth ties by list order, which changes as pieces leave and rejoin
+        // the list. A tiny nudge in today's list order keeps overlapping scenery drawn
+        // exactly as before (at most ~0.001, far below any real depth gap).
         const list = scene.children.list;
+        let nudge = 0;
+        for (let i = list.length - 1; i >= 0; i--)
+        {
+            const o = list[i] as Cullable & GameObjects.Components.Depth;
+            if (managed.has(o)) o.setDepth(o.depth - (nudge += TIE_BREAK));
+        }
+        // Pull them all off the draw list in one pass (one by one would be slow at this size).
         let kept = 0;
         for (const o of list) if (!managed.has(o)) list[kept++] = o;
         list.length = kept;
