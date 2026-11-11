@@ -1,6 +1,9 @@
 ﻿import { GameObjects, Scene } from 'phaser';
+import type { BattlefieldLayout } from '../logic/BattlefieldLayout';
 import { leaderId, type LeaderboardRow } from '../logic/Leaderboard';
 import type { PlayerResources } from '../logic/PlayerResources';
+import type { Rect, Vec2 } from '../logic/Types';
+import { createMinimapTexture } from '../render/MinimapArt';
 import { hexToInt, Palette, type ArmyColor } from '../render/Palette';
 import { ensurePixelFont, PIXEL_FONT } from '../render/PixelFont';
 import { Tex } from '../render/PlaceholderArt';
@@ -24,6 +27,12 @@ export interface HudData {
     getLeaderboard: () => LeaderboardRow[];
     /** Your player id (to highlight your row). */
     getMyId: () => string;
+    /** The map, painted once for the minimap. */
+    layout: BattlefieldLayout;
+    /** For the minimap: where your army is (one point per group) and what the screen shows (world px). */
+    getMapView: () => { army: Vec2[]; view: Rect };
+    /** A message across the middle of the screen (e.g. reconnecting), or null for none. */
+    getNotice?: () => string | null;
     playerColor: ArmyColor;
     recruitCost: number;
     /** Green crystals per Archer. */
@@ -57,7 +66,27 @@ const BOARD = {
     maxRows: 10,
     col: { rank: 12, swatch: 34, name: 54, army: 266, kills: 350 },
     refreshMs: 250,
+    /** See-through, so the battlefield shows behind it. */
+    backgroundAlpha: 0.42,
 };
+/** Remembers whether the player hid the leaderboard / minimap (this browser only). */
+const BOARD_HIDDEN_KEY = 'raidkin.leaderboardHidden';
+const MINIMAP_HIDDEN_KEY = 'raidkin.minimapHidden';
+
+/** Minimap, top left under the bar. */
+const MINIMAP = {
+    /** Longest side on screen (px). */
+    size: 160,
+    left: PADDING_X,
+    top: BAR_HEIGHT + 12,
+    alpha: 0.85,
+    refreshMs: 100,
+    textureKey: 'minimap',
+};
+
+/** Hide/show buttons: a small square beside an open panel, or a tab in its place when hidden. */
+const TOGGLE_SIZE = 26;
+const TOGGLE_GAP = 6;
 
 const COLORS = {
     background: 0x0a0c09,
@@ -95,6 +124,67 @@ function splitStateKey (split: SplitState | null): string
 function textWidth (text: string): number
 {
     return Math.max(0, text.length * CHAR_WIDTH - TEXT_SCALE);
+}
+
+interface ToggleOptions {
+    /** Where the choice is remembered. */
+    storageKey: string;
+    /** Keyboard shortcut (Phaser key name, e.g. 'L'). */
+    keyName: string;
+    /** The tab's text while hidden (e.g. '+ MAP'). */
+    hiddenLabel: string;
+    /** Open: the "-" square's left edge, and the top of both. */
+    openX: number;
+    y: number;
+    /** Hidden: the tab lines up with this x, by its right edge or its left edge. */
+    hiddenEdgeX: number;
+    hiddenAlignRight: boolean;
+    onChange: (hidden: boolean) => void;
+}
+
+/**
+ * A hide/show button for a HUD panel: a small "-" square beside the open
+ * panel, a "+ NAME" tab in its place while hidden, plus a key. The choice is
+ * remembered in this browser.
+ */
+class PanelToggle
+{
+    hidden = false;
+    private readonly box: GameObjects.Graphics;
+    private readonly label: GameObjects.BitmapText;
+    private readonly zone: GameObjects.Zone;
+
+    constructor (scene: Scene, private readonly options: ToggleOptions)
+    {
+        this.box = scene.add.graphics();
+        this.label = scene.add.bitmapText(0, 0, PIXEL_FONT, '').setScale(TEXT_SCALE).setOrigin(0.5, 0.5);
+        this.zone = scene.add.zone(0, 0, 1, 1).setOrigin(0, 0).setInteractive({ useHandCursor: true });
+        this.zone.on('pointerdown', () => this.set(!this.hidden));
+        scene.input.keyboard?.on(`keydown-${options.keyName}`, () => this.set(!this.hidden));
+        let hidden = false;
+        try { hidden = localStorage.getItem(options.storageKey) === '1'; }
+        catch { /* storage blocked: start shown */ }
+        this.set(hidden);
+    }
+
+    set (hidden: boolean): void
+    {
+        this.hidden = hidden;
+        try { localStorage.setItem(this.options.storageKey, hidden ? '1' : '0'); }
+        catch { /* storage blocked: fine, it just won't be remembered */ }
+
+        const o = this.options;
+        const text = hidden ? o.hiddenLabel : '-';
+        const width = hidden ? textWidth(text) + 20 : TOGGLE_SIZE;
+        const x = !hidden ? o.openX : o.hiddenAlignRight ? o.hiddenEdgeX - width : o.hiddenEdgeX;
+        this.box.clear()
+            .fillStyle(COLORS.background, BOARD.backgroundAlpha + 0.2).fillRect(x, o.y, width, TOGGLE_SIZE)
+            .lineStyle(2, COLORS.borderDark, 0.8).strokeRect(x, o.y, width, TOGGLE_SIZE);
+        this.label.setText(text).setPosition(x + width / 2, o.y + TOGGLE_SIZE / 2 + 1).setTint(hidden ? COLORS.value : COLORS.label);
+        this.zone.setPosition(x - 4, o.y - 4).setSize(width + 8, TOGGLE_SIZE + 8);
+        this.zone.input?.hitArea.setTo(0, 0, width + 8, TOGGLE_SIZE + 8);
+        o.onChange(hidden);
+    }
 }
 
 interface BoardRowObjects {
@@ -140,6 +230,20 @@ export class Hud extends Scene
     private boardX = 0;
     private boardKey = '';
     private nextBoardAt = 0;
+    /** Everything in the panel, so it can be hidden in one go. */
+    private boardContainer: GameObjects.Container;
+    private boardToggle: PanelToggle;
+
+    private minimapContainer: GameObjects.Container;
+    private minimapMarkers: GameObjects.Graphics;
+    private minimapToggle: PanelToggle;
+    /** Where the map sits on screen, and screen px per world px. */
+    private minimapBox = { x: 0, y: 0, width: 0, height: 0, scale: 0 };
+    private nextMinimapAt = 0;
+
+    private notice: GameObjects.BitmapText;
+    private noticeBack: GameObjects.Graphics;
+    private noticeShown: string | null = null;
 
     constructor ()
     {
@@ -155,6 +259,7 @@ export class Hud extends Scene
         this.boardShownRows = -1;
         this.boardKey = '';
         this.nextBoardAt = 0;
+        this.nextMinimapAt = 0;
         ensurePixelFont(this);
 
         const width = this.scale.width;
@@ -225,6 +330,11 @@ export class Hud extends Scene
             .setOrigin(0, 1).setScale(TEXT_SCALE).setTint(COLORS.label).setAlpha(0.7);
 
         this.createLeaderboard(width);
+        this.createMinimap();
+        this.noticeShown = null;
+        this.noticeBack = this.add.graphics().setVisible(false);
+        this.notice = this.add.bitmapText(width / 2, Math.round(this.scale.height * 0.28), PIXEL_FONT, '')
+            .setOrigin(0.5, 0.5).setScale(TEXT_SCALE * 1.5).setTint(COLORS.timer).setVisible(false);
         this.refresh();
         this.refreshLeaderboard();
     }
@@ -238,11 +348,31 @@ export class Hud extends Scene
         {
             this.refresh();
         }
-        if (time >= this.nextBoardAt)
+        if (!this.boardToggle.hidden && time >= this.nextBoardAt)
         {
             this.nextBoardAt = time + BOARD.refreshMs;
             this.refreshLeaderboard();
         }
+        const notice = this.source.getNotice?.() ?? null;
+        if (notice !== this.noticeShown) this.showNotice(notice);
+        if (!this.minimapToggle.hidden && time >= this.nextMinimapAt)
+        {
+            this.nextMinimapAt = time + MINIMAP.refreshMs;
+            this.drawMinimapMarkers();
+        }
+    }
+
+    private showNotice (text: string | null): void
+    {
+        this.noticeShown = text;
+        this.notice.setVisible(text !== null);
+        this.noticeBack.setVisible(text !== null);
+        if (text === null) return;
+        this.notice.setText(text);
+        const b = this.notice.getBounds();
+        this.noticeBack.clear()
+            .fillStyle(COLORS.background, 0.75).fillRect(b.x - 18, b.y - 12, b.width + 36, b.height + 24)
+            .lineStyle(2, COLORS.borderDark, 0.9).strokeRect(b.x - 18, b.y - 12, b.width + 36, b.height + 24);
     }
 
     private refresh (): void
@@ -296,17 +426,89 @@ export class Hud extends Scene
         this.boardX = x;
         const y = BOARD.top;
 
+        this.boardContainer = this.add.container(0, 0);
         this.boardBackground = this.add.graphics();
         this.boardGraphics = this.add.graphics();
         this.boardCrown = this.add.image(0, 0, Tex.Crown).setScale(TEXT_SCALE).setOrigin(0, 0.5).setVisible(false);
+        this.boardContainer.add([this.boardBackground, this.boardGraphics, this.boardCrown]);
 
         const header = (col: number, text: string, alignRight = false) =>
-            this.add.bitmapText(x + col, y + 8, PIXEL_FONT, text).setScale(TEXT_SCALE).setTint(COLORS.label).setOrigin(alignRight ? 1 : 0, 0);
+            this.boardContainer.add(this.add.bitmapText(x + col, y + 8, PIXEL_FONT, text).setScale(TEXT_SCALE).setTint(COLORS.label).setOrigin(alignRight ? 1 : 0, 0));
         header(BOARD.col.rank, '#');
         header(BOARD.col.name, 'NAME');
         header(BOARD.col.army, 'ARMY', true);
         header(BOARD.col.kills, 'KILLS', true);
         this.sizeLeaderboard(this.source.getLeaderboard().length);
+
+        // Hide / show: a small "-" square left of the panel, or the L key;
+        // hidden, a "+ LEADERBOARD" tab sits where the panel was.
+        this.boardToggle = new PanelToggle(this, {
+            storageKey: BOARD_HIDDEN_KEY, keyName: 'L', hiddenLabel: '+ LEADERBOARD',
+            openX: x - TOGGLE_GAP - TOGGLE_SIZE, y, hiddenEdgeX: x + BOARD.width, hiddenAlignRight: true,
+            onChange: (hidden) => {
+                this.boardContainer.setVisible(!hidden);
+                if (!hidden)
+                {
+                    this.boardKey = '';
+                    this.refreshLeaderboard();
+                }
+            },
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Minimap (where you are; it never shows other players)
+    // -----------------------------------------------------------------------
+
+    private createMinimap (): void
+    {
+        const art = createMinimapTexture(this, this.source.layout, MINIMAP.textureKey);
+        const scale = MINIMAP.size / Math.max(art.width, art.height);
+        const width = Math.round(art.width * scale);
+        const height = Math.round(art.height * scale);
+        const x = MINIMAP.left;
+        const y = MINIMAP.top;
+        this.minimapBox = { x, y, width, height, scale: width / this.source.layout.worldWidth };
+
+        const frame = this.add.graphics()
+            .fillStyle(COLORS.background, BOARD.backgroundAlpha).fillRect(x - 2, y - 2, width + 4, height + 4)
+            .lineStyle(2, COLORS.borderDark, 0.7).strokeRect(x - 2, y - 2, width + 4, height + 4);
+        const image = this.add.image(x, y, MINIMAP.textureKey).setOrigin(0, 0).setDisplaySize(width, height).setAlpha(MINIMAP.alpha);
+        this.minimapMarkers = this.add.graphics();
+        this.minimapContainer = this.add.container(0, 0, [frame, image, this.minimapMarkers]);
+
+        // Hide / show like the leaderboard: "-" right of the map, or the M key.
+        this.minimapToggle = new PanelToggle(this, {
+            storageKey: MINIMAP_HIDDEN_KEY, keyName: 'M', hiddenLabel: '+ MAP',
+            openX: x + width + 2 + TOGGLE_GAP, y: y - 2, hiddenEdgeX: x - 2, hiddenAlignRight: false,
+            onChange: (hidden) => {
+                this.minimapContainer.setVisible(!hidden);
+                if (!hidden) this.drawMinimapMarkers();
+            },
+        });
+        this.drawMinimapMarkers();
+    }
+
+    /** Your army (one dot per group) and the part of the map your screen shows. */
+    private drawMinimapMarkers (): void
+    {
+        const box = this.minimapBox;
+        const g = this.minimapMarkers.clear();
+        const { army, view } = this.source.getMapView();
+        const sx = (wx: number) => box.x + Math.max(0, Math.min(box.width, wx * box.scale));
+        const sy = (wy: number) => box.y + Math.max(0, Math.min(box.height, wy * box.scale));
+
+        // What's on screen right now.
+        const left = sx(view.x);
+        const top = sy(view.y);
+        g.lineStyle(1, COLORS.value, 0.55).strokeRect(left, top, sx(view.x + view.width) - left, sy(view.y + view.height) - top);
+
+        // You.
+        for (const p of army)
+        {
+            g.fillStyle(0x000000, 0.8).fillCircle(sx(p.x), sy(p.y), 4.5);
+            g.fillStyle(COLORS.you, 1).fillCircle(sx(p.x), sy(p.y), 3);
+        }
     }
 
     /** Fit the panel to `count` rows (online, people come and go), making more rows as needed. */
@@ -319,7 +521,11 @@ export class Hud extends Scene
         {
             const rowY = y + BOARD.headerHeight + this.boardRows.length * BOARD.rowHeight;
             const make = (col: number, alignRight = false) =>
-                this.add.bitmapText(x + col, rowY, PIXEL_FONT, '').setScale(TEXT_SCALE).setOrigin(alignRight ? 1 : 0, 0);
+            {
+                const t = this.add.bitmapText(x + col, rowY, PIXEL_FONT, '').setScale(TEXT_SCALE).setOrigin(alignRight ? 1 : 0, 0);
+                this.boardContainer.add(t);
+                return t;
+            };
             this.boardRows.push({ rank: make(BOARD.col.rank), name: make(BOARD.col.name), army: make(BOARD.col.army, true), kills: make(BOARD.col.kills, true) });
         }
         this.boardRows.forEach((r, i) => {
@@ -329,9 +535,9 @@ export class Hud extends Scene
         this.boardShownRows = count;
         const height = BOARD.headerHeight + count * BOARD.rowHeight + 6;
         this.boardBackground.clear()
-            .fillStyle(COLORS.borderDark, 1).fillRect(x - 2, y - 2, BOARD.width + 4, height + 4)
-            .fillStyle(COLORS.background, 0.86).fillRect(x, y, BOARD.width, height)
-            .fillStyle(COLORS.borderLight, 0.8).fillRect(x, y + BOARD.headerHeight - 6, BOARD.width, 1);
+            .fillStyle(COLORS.background, BOARD.backgroundAlpha).fillRect(x, y, BOARD.width, height)
+            .lineStyle(2, COLORS.borderDark, 0.6).strokeRect(x - 1, y - 1, BOARD.width + 2, height + 2)
+            .fillStyle(COLORS.borderLight, 0.6).fillRect(x, y + BOARD.headerHeight - 6, BOARD.width, 1);
     }
 
     private refreshLeaderboard (): void

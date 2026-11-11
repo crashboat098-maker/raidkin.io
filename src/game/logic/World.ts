@@ -6,6 +6,7 @@ import { CastleField, type CastleStatus } from './Castles';
 import { assignEngagements, regenerate, removeDead, resolveAttacks, type Death, type Hit } from './Combat';
 import { FallenField, type FallenBody } from './Fallen';
 import { isLava } from './LavaRivers';
+import type { SteerInput } from './Navigation';
 import { NeutralForces, type NeutralWarrior } from './Neutrals';
 import { ObstacleMap } from './Obstacles';
 import { createIdSource, createPlayer, createStartingArmy, type Player } from './Player';
@@ -81,8 +82,8 @@ const BOT_NAMES_END = ['gar', 'wen', 'dric', 'mont', 'vash', 'thorn', 'ric', 'ly
 
 /** One frame of a human player's input. */
 export interface PlayerCommand {
-    /** Movement direction, each axis -1..1. */
-    move: Vec2;
+    /** Movement direction, each axis -1..1, plus how far away the target is (mouse steering). */
+    move: SteerInput;
     /** Split this frame: the direction to split toward, or true for the army's heading. */
     split: boolean | Vec2 | null;
     /** Surrender a soldier this frame, sent in this direction. */
@@ -136,7 +137,7 @@ export class World implements GameWorld
     constructor (private readonly config: Config, options: WorldOptions = {}, botColors: readonly string[] = [])
     {
         this.layout = generateBattlefield(config.world);
-        this.obstacles = new ObstacleMap(this.layout.obstacles, this.layout.water, config.water.slowdown);
+        this.obstacles = new ObstacleMap(this.layout.obstacles, this.layout.water, config.water.slowdown, this.layout.lava);
         this.moveBounds = movementBounds(this.layout);
         this.nextUnitId = createIdSource();
         this.rng = createRng((options.seed ?? config.world.seed) + 7);
@@ -267,7 +268,7 @@ export class World implements GameWorld
      * @param commands What every other human player (online) does this frame.
      */
     update (
-        now: number, dt: number, humanInput: Vec2, humanSplit: boolean | Vec2 | null, humanSurrenderAim: Vec2 | null = null,
+        now: number, dt: number, humanInput: SteerInput, humanSplit: boolean | Vec2 | null, humanSurrenderAim: Vec2 | null = null,
         commands?: ReadonlyMap<Player, PlayerCommand>,
     ): WorldEvents
     {

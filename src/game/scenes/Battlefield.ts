@@ -1,7 +1,7 @@
 ﻿import { GameObjects, Scene } from 'phaser';
 import { GameConfig } from '../config/GameConfig';
 import { KeyboardControls } from '../input/KeyboardControls';
-import type { Warrior } from '../logic/Army';
+import { centroid, type Warrior } from '../logic/Army';
 import type { Player } from '../logic/Player';
 import type { GameWorld } from '../logic/GameWorld';
 import { allWarriors, representative, totalSoldiers } from '../logic/PlayerArmy';
@@ -153,6 +153,20 @@ export class Battlefield extends Scene
             getSplitState: () => this.world.splitState(this.time.now),
             getLeaderboard: () => rankPlayers(this.world.players),
             getMyId: () => this.world.human.id,
+            layout: this.world.layout,
+            // Only your own army: the minimap never shows other players.
+            getMapView: () => {
+                const human = this.world.human;
+                const army = human.respawnAt !== null ? [] : human.army.clusters
+                    .filter((c) => c.cluster.warriors.length > 0)
+                    .map((c) => centroid(c.cluster.warriors));
+                const v = this.cameras.main.worldView;
+                return { army, view: { x: v.x, y: v.y, width: v.width, height: v.height } };
+            },
+            getNotice: () => {
+                if (!this.net?.reconnecting) return null;
+                return `CONNECTION LOST - RECONNECTING ${this.net.rejoinSecondsLeft()}`;
+            },
             playerColor: this.settings.color,
             recruitCost: GameConfig.army.recruitCost,
             archerCost: GameConfig.army.archerCost,

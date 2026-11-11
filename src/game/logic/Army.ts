@@ -507,18 +507,28 @@ function planRoute (
     obstacles: ObstacleMap, bounds: Rect,
 ): Route
 {
-    if (hasClearPath(obstacles, warrior.position, target)) return { mode: 'slot' };
-    if (hasClearPath(obstacles, warrior.position, centre)) return { mode: 'center' };
+    const from = warrior.position;
+    if (hasDryPath(obstacles, from, target)) return { mode: 'slot' };
+    if (hasDryPath(obstacles, from, centre)) return { mode: 'center' };
 
     // Already following a detour? Keep going rather than recomputing it.
     const current = warrior.route;
     if (current.mode === 'detour' && current.index < current.points.length) return current;
 
-    // Newest breadcrumb we can walk straight to (newest = closest to the centre along the path).
+    // Newest breadcrumb we can walk straight to (newest = closest to the centre
+    // along the path). A dry one first: the army's own footsteps lead over the
+    // bridge, so soldiers stream across it instead of wading beside it.
+    let wetCrumb = -1;
     for (let i = trail.length - 1; i >= Math.max(0, trail.length - 40); i--)
     {
-        if (hasClearPath(obstacles, warrior.position, trail[i])) return { mode: 'crumb', index: i };
+        if (!hasClearPath(obstacles, from, trail[i])) continue;
+        if (!wadesBetween(obstacles, from, trail[i])) return { mode: 'crumb', index: i };
+        if (wetCrumb < 0) wetCrumb = i;
     }
+    // No dry way: wading is fine.
+    if (hasClearPath(obstacles, from, target)) return { mode: 'slot' };
+    if (hasClearPath(obstacles, from, centre)) return { mode: 'center' };
+    if (wetCrumb >= 0) return { mode: 'crumb', index: wetCrumb };
 
     // Nothing in sight at all: search a small grid around us for a way to the centre.
     const detour = findDetour(obstacles, bounds, warrior.position, centre);
@@ -538,6 +548,29 @@ export function hasClearPath (obstacles: ObstacleMap, a: Vec2, b: Vec2): boolean
         if (obstacles.overlaps(bodyRect(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, WARRIOR_BODY))) return false;
     }
     return true;
+}
+
+/**
+ * Would walking straight from dry `a` to dry `b` wade through water or lava
+ * on the way (e.g. across a river when a bridge is near)? False when either
+ * end is already wet: then there's no dry way to avoid it.
+ */
+export function wadesBetween (obstacles: ObstacleMap, a: Vec2, b: Vec2): boolean
+{
+    if (obstacles.travelCost(a.x, a.y) > 1 || obstacles.travelCost(b.x, b.y) > 1) return false;
+    const steps = Math.ceil(distance(a, b) / 4);
+    for (let i = 1; i < steps; i++)
+    {
+        const t = i / steps;
+        if (obstacles.travelCost(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t) > 1) return true;
+    }
+    return false;
+}
+
+/** A straight walk that's clear of obstacles and stays dry (see wadesBetween). */
+export function hasDryPath (obstacles: ObstacleMap, a: Vec2, b: Vec2): boolean
+{
+    return !wadesBetween(obstacles, a, b) && hasClearPath(obstacles, a, b);
 }
 
 /** Size of the cells used by the rare detour search (world pixels). */

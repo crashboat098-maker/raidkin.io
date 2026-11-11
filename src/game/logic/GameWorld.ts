@@ -1,5 +1,6 @@
 import type { BattlefieldLayout } from './BattlefieldLayout';
 import type { CastleStatus } from './Castles';
+import type { SteerInput } from './Navigation';
 import type { NeutralWarrior } from './Neutrals';
 import type { ObstacleMap } from './Obstacles';
 import type { Player } from './Player';
@@ -26,7 +27,7 @@ export interface GameWorld {
     readonly humanDefeated: boolean;
 
     /** Advance one frame with this player's input; returns what happened (for effects). */
-    update (now: number, dt: number, input: Vec2, split: boolean | Vec2 | null, surrender: Vec2 | null): WorldEvents;
+    update (now: number, dt: number, input: SteerInput, split: boolean | Vec2 | null, surrender: Vec2 | null): WorldEvents;
     /** The HUD's split segment: null while the army is together. */
     splitState (now: number): { clusters: number; regroupSeconds: number | null } | null;
     /** Numbers for the defeat screen. */

@@ -1,9 +1,10 @@
 import {
-    centroid, clusterRadius, createCluster, distance, findDetour, findFreeSpotNear, hasClearPath, reassignSlots,
-    speedMultiplier, updateCluster,
+    centroid, clusterRadius, createCluster, distance, findDetour, findFreeSpotNear, hasClearPath, hasDryPath, reassignSlots,
+    speedMultiplier, updateCluster, wadesBetween,
     type Cluster, type ClusterSettings, type Warrior,
 } from './Army';
 import { CENTER_BODY, updateMover, type MovementTuning } from './Movement';
+import { createNavigator, findPath, steerAround, type Navigator, type SteerInput } from './Navigation';
 import { bodyRect, type ObstacleMap } from './Obstacles';
 import type { Rect, Vec2 } from './Types';
 
@@ -57,6 +58,8 @@ export interface ArmyCluster {
 export interface PlayerArmy {
     /** The invisible point the player steers (plus its breadcrumb trail). Never has soldiers. */
     lead: Cluster;
+    /** The lead's route around obstacles toward where the player points. */
+    nav: Navigator;
     clusters: ArmyCluster[];
     nextClusterId: number;
     /** Every cluster id ever made -> its parent id, so returning clusters can skip parents that are gone. */
@@ -114,6 +117,7 @@ export function createPlayerArmy (spawn: Vec2): PlayerArmy
 {
     return {
         lead: createCluster(0, spawn),
+        nav: createNavigator(),
         clusters: [wrapCluster(createCluster(1, spawn), null, -Infinity)],
         nextClusterId: 2,
         parentOf: new Map([[1, null]]),
@@ -348,7 +352,7 @@ export interface ArmyUpdateResult {
  */
 export function updatePlayerArmy (
     army: PlayerArmy,
-    input: Vec2,
+    input: SteerInput,
     dt: number,
     now: number,
     obstacles: ObstacleMap,
@@ -365,9 +369,11 @@ export function updatePlayerArmy (
     const targets = clusterTargets(army, plan, obstacles, bounds, settings);
 
     // The lead: player-controlled, speed set by the largest cluster, slowed if the army lags.
+    // It walks a route around obstacles toward where the player points.
     const armySpeed = movement.maxSpeed * armySpeedMultiplier(army, settings);
     const leadTuning = { ...movement, maxSpeed: armySpeed * leashFactor(army, targets, settings) };
-    updateMover(army.lead.center, input, dt, bounds, leadTuning, obstacles);
+    const steer = steerAround(army.nav, army.lead.center.position, input, now, obstacles, bounds);
+    updateMover(army.lead.center, steer, dt, bounds, leadTuning, obstacles);
     updateCluster(army.lead, dt, now, obstacles, bounds, settings); // heading + breadcrumbs only (no soldiers)
 
     // Every cluster follows its place, then its soldiers follow the cluster.
@@ -576,12 +582,13 @@ function steerCluster (
     }
     updateMover(centre, input, dt, bounds, { ...movement, maxSpeed: speed }, obstacles);
 
-    // Stuck? Search a small area for a way around.
+    // Stuck? Find a way round: a short local search first, then a wider path
+    // search (e.g. along a river to its bridge).
     if (now >= ac.nextStuckCheckAt)
     {
         if (distance(centre.position, ac.lastCheckPosition) < STUCK_DISTANCE && distance(centre.position, target) > 24)
         {
-            const detour = findDetour(obstacles, bounds, centre.position, target);
+            const detour = findDetour(obstacles, bounds, centre.position, target) ?? findPath(obstacles, bounds, centre.position, target)?.points;
             if (detour && detour.length > 0)
             {
                 ac.route = { mode: 'detour', points: detour, index: 0 };
@@ -595,18 +602,24 @@ function steerCluster (
 
 function planFollow (from: Vec2, target: Vec2, lead: Cluster, obstacles: ObstacleMap, current: FollowRoute): FollowRoute
 {
-    if (hasClearPath(obstacles, from, target)) return { mode: 'direct' };
+    if (hasDryPath(obstacles, from, target)) return { mode: 'direct' };
 
     // Keep following a detour that's still in progress.
     if (current.mode === 'detour' && current.index < current.points.length) return current;
 
-    // The newest breadcrumb we can walk straight to.
+    // The newest breadcrumb we can walk straight to, dry ones first (the
+    // lead's footsteps go round walls and over bridges).
     const trail = lead.trail;
+    let wetCrumb = -1;
     for (let i = trail.length - 1; i >= 0; i--)
     {
         if (distance(trail[i], from) > CRUMB_SEARCH_RADIUS) continue;
-        if (hasClearPath(obstacles, from, trail[i])) return { mode: 'trail', index: i, shiftsAtPlan: lead.trailShifts };
+        if (!hasClearPath(obstacles, from, trail[i])) continue;
+        if (!wadesBetween(obstacles, from, trail[i])) return { mode: 'trail', index: i, shiftsAtPlan: lead.trailShifts };
+        if (wetCrumb < 0) wetCrumb = i;
     }
+    if (hasClearPath(obstacles, from, target)) return { mode: 'direct' };
+    if (wetCrumb >= 0) return { mode: 'trail', index: wetCrumb, shiftsAtPlan: lead.trailShifts };
 
     if (current.mode === 'trail') return current;
     return { mode: 'direct' };
@@ -682,6 +695,8 @@ function mergeReturning (army: PlayerArmy, plan: RegroupPlan, settings: PlayerAr
         const at = army.clusters[0].cluster.center.position;
         lead.x = at.x;
         lead.y = at.y;
+        army.nav.nextPlanAt = 0; // its route was planned from where it stood
+
     }
     return merges;
 }

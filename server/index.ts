@@ -16,6 +16,7 @@
  *                    (empty = any page may connect)
  *   MAX_PLAYERS      most people playing at once (default 40)
  */
+import { randomUUID } from 'node:crypto';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { extname, join, normalize, resolve } from 'node:path';
@@ -29,7 +30,7 @@ import { allWarriors, armySpeedMultiplier, secondsUntilRegroup } from '../src/ga
 import type { Vec2 } from '../src/game/logic/Types';
 import { World, type PlayerCommand, type WorldEvents } from '../src/game/logic/World';
 import {
-    castleRow, cleanDirection, emptyEvents, encodeBody, encodeSnapshot, JOIN_RECRUITED, JOIN_SUMMONED, PROTOCOL_VERSION, rosterRow, round1,
+    castleRow, cleanDirection, emptyEvents, encodeBody, encodeSnapshot, JOIN_RECRUITED, JOIN_SUMMONED, PROTOCOL_VERSION, REJOIN_GRACE_MS, rosterRow, round1,
     type ClientMessage, type EventRows, type ServerMessage, type SnapshotArmy, type YouRow,
 } from '../src/game/net/Protocol';
 import { ARMY_COLORS, type ArmyColor } from '../src/game/render/Palette';
@@ -98,6 +99,27 @@ function netIdOf (p: Player): number
     return id;
 }
 const clients = new Set<Client>();
+
+/**
+ * Rejoining after a dropped connection. Every army gets a secret token when
+ * it joins. If the connection drops (page closed, network hiccup), the army
+ * stays in the match, standing still, for REJOIN_GRACE_MS; joining again with
+ * the token takes it back. After that it surrenders as before. Leaving on
+ * purpose (or being defeated) ends it at once.
+ */
+const tokenOwner = new Map<string, Player>();
+const tokenOf = new WeakMap<Player, string>();
+/** Armies whose player dropped, and when they surrender if nobody comes back. */
+const away = new Map<Player, number>();
+
+function newToken (p: Player): string
+{
+    const token = randomUUID();
+    tokenOwner.set(token, p);
+    tokenOf.set(p, token);
+    return token;
+}
+
 let pending: EventRows = emptyEvents();
 let tick = 0;
 let lastTickAt = clock();
@@ -107,9 +129,10 @@ function send (client: Client, message: ServerMessage): void
     if (client.socket.readyState === client.socket.OPEN) client.socket.send(JSON.stringify(message));
 }
 
+/** People in the match, counting those who dropped and may still come back. */
 function playingCount (): number
 {
-    let n = 0;
+    let n = away.size;
     for (const c of clients) if (c.player) n++;
     return n;
 }
@@ -157,8 +180,16 @@ function step (): void
     for (const c of clients) c.command = { move: c.command.move, split: null, surrender: null };
     collectEvents(events, now);
 
+    // Dropped players who didn't come back in time surrender their army.
+    for (const [p, until] of away)
+    {
+        if (now >= until) removeNow(p);
+    }
+
     for (const p of events.eliminated)
     {
+        // Defeated while away: nothing left to come back to.
+        if (away.has(p)) { removeNow(p); continue; }
         const client = [...clients].find((c) => c.player === p);
         if (!client) continue;
         send(client, {
@@ -250,9 +281,31 @@ function inBox (box: Box, at: Vec2): boolean
 // Connections
 // ---------------------------------------------------------------------------
 
-function joinGame (client: Client, name: unknown, color: unknown): void
+function joinGame (client: Client, name: unknown, color: unknown, resume: unknown, resumeOnly: boolean): void
 {
-    leave(client);
+    leave(client, false);
+
+    // Taking back an army after a dropped connection.
+    // An automatic reconnect (`resumeOnly`) may take the army over from a connection the
+    // server hasn't noticed is dead yet; joining from the start screen only takes back
+    // an army that is waiting (so a second tab can't grab the first tab's army).
+    const mine = typeof resume === 'string' ? tokenOwner.get(resume) : undefined;
+    if (mine && world.players.includes(mine) && world.isAlive(mine) && (resumeOnly || away.has(mine)))
+    {
+        // Still held by another connection: that one lets go.
+        for (const other of clients)
+        {
+            if (other === client || other.player !== mine) continue;
+            other.player = null;
+            other.socket.close(4000, 'rejoined elsewhere');
+        }
+        away.delete(mine);
+        startPlaying(client, mine, true);
+        console.log(`${mine.name} rejoined`);
+        return;
+    }
+    if (resumeOnly) { send(client, { t: 'error', reason: 'expired' }); return; }
+
     if (playingCount() >= MAX_PLAYERS) { send(client, { t: 'error', reason: 'full' }); return; }
     const cleanName = sanitizeName(typeof name === 'string' ? name.toUpperCase() : '') || 'RAIDER';
     const cleanColor = ARMY_COLORS.includes(color as ArmyColor) ? (color as ArmyColor) : 'crimson';
@@ -264,24 +317,51 @@ function joinGame (client: Client, name: unknown, color: unknown): void
         pending = emptyEvents();
         console.log('First player joined: new match started');
     }
-    client.player = world.addHuman(cleanName, cleanColor, now);
+    startPlaying(client, world.addHuman(cleanName, cleanColor, now), false);
+}
+
+/** Hand `player` to this connection and send it what it needs to draw the match. */
+function startPlaying (client: Client, player: Player, resumed: boolean): void
+{
+    const now = clock();
+    client.player = player;
     client.command = { move: { x: 0, y: 0 }, split: null, surrender: null };
-    // The page builds a fresh match view: it needs the roster again.
+    // The page builds a fresh match view (or catches up after a drop): it needs the roster again.
     client.rosterSent = '';
 
-    send(client, { t: 'joined', id: client.player.id });
+    const token = tokenOf.get(player) ?? newToken(player);
+    send(client, { t: 'joined', id: player.id, token, resumed });
     const shards: number[] = [];
     for (const s of world.shards.shards) shards.push(s.id, s.x, s.y, s.active ? 1 : 0);
     send(client, { t: 'state', time: Math.round(now), shards, bodies: [...world.fallen.all].map((b) => encodeBody(b, now)) });
     broadcastLobby();
 }
 
-function leave (client: Client): void
+/**
+ * This connection stops playing. `keepArmy`: the connection dropped, so the
+ * army waits (standing still) in case they come back; otherwise it's gone now.
+ */
+function leave (client: Client, keepArmy: boolean): void
 {
-    if (!client.player) return;
-    // The army stays behind as neutrals anyone can collect.
-    for (const r of world.removePlayer(client.player, clock())) pending.surrendered.push(r.warrior.id, r.neutral.siteId);
+    const p = client.player;
+    if (!p) return;
     client.player = null;
+    if (keepArmy && world.players.includes(p) && world.isAlive(p))
+    {
+        away.set(p, clock() + REJOIN_GRACE_MS);
+        console.log(`${p.name} dropped: army kept for ${REJOIN_GRACE_MS / 1000} s`);
+    }
+    else removeNow(p);
+    broadcastLobby();
+}
+
+/** Take a player out of the match. Its army stays behind as neutrals anyone can collect. */
+function removeNow (p: Player): void
+{
+    away.delete(p);
+    const token = tokenOf.get(p);
+    if (token) tokenOwner.delete(token);
+    for (const r of world.removePlayer(p, clock())) pending.surrendered.push(r.warrior.id, r.neutral.siteId);
     if (playingCount() === 0) console.log('Last player left: match switched off');
     broadcastLobby();
 }
@@ -302,14 +382,17 @@ function handle (client: Client, raw: string): void
     {
         case 'join':
             if (message.v !== PROTOCOL_VERSION) { send(client, { t: 'error', reason: 'version' }); return; }
-            joinGame(client, message.name, message.color);
+            joinGame(client, message.name, message.color, message.resume, message.resumeOnly === true);
             return;
         case 'leave':
-            leave(client);
+            leave(client, false);
             return;
         case 'in': {
             const move = cleanDirection(message.x, message.y, true);
-            if (move) client.command = { ...client.command, move };
+            // Mouse steering also says how far away the pointer is, so the army can plan a route to it.
+            const reach = message.r;
+            if (move && typeof reach === 'number' && Number.isFinite(reach) && reach >= 0) client.command = { ...client.command, move: { ...move, reach } };
+            else if (move) client.command = { ...client.command, move };
             return;
         }
         case 'split': {
@@ -381,7 +464,8 @@ wss.on('connection', (socket) => {
         handle(client, data.toString());
     });
     socket.on('close', () => {
-        leave(client);
+        // A dropped connection keeps the army for a while, in case they rejoin.
+        leave(client, true);
         clients.delete(client);
         broadcastLobby();
     });
