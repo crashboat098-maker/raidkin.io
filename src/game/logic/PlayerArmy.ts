@@ -4,7 +4,7 @@ import {
     type Cluster, type ClusterSettings, type Warrior,
 } from './Army';
 import { CENTER_BODY, updateMover, type MovementTuning } from './Movement';
-import { createNavigator, findPath, steerAround, type Navigator, type SteerInput } from './Navigation';
+import { createNavigator, findPath, navigationGoal, steerAround, type Navigator, type SteerInput } from './Navigation';
 import { bodyRect, type ObstacleMap } from './Obstacles';
 import type { Rect, Vec2 } from './Types';
 
@@ -41,16 +41,17 @@ export interface ArmyCluster {
     parentId: number | null;
     /** When this cluster was last split (its regroup timer counts from here). */
     splitAt: number;
-    /** Until this time the cluster rushes out to its place in the fan (0 = not launching). */
+    /** Until this time the cluster is shooting out after a split (0 = not launching). */
     launchUntil: number;
-    /**
-     * The direction it was split toward (unit vector; zero for the root). Its
-     * place is ahead of its parent in this direction, so splits go forward
-     * and the parent stays where it is.
-     */
+    /** Where a freshly split cluster shoots out to (ahead of where it split, toward the mouse). */
+    launchTarget: Vec2 | null;
+    /** The direction it was split toward (unit vector; zero for the root). */
     splitDir: Vec2;
     route: FollowRoute;
     nextPlanAt: number;
+    /** This cluster's own aim along the army's route (re-picked a few times a second). */
+    aim: Vec2 | null;
+    nextAimAt: number;
     lastCheckPosition: Vec2;
     nextStuckCheckAt: number;
 }
@@ -82,9 +83,13 @@ export interface PlayerArmySettings extends ClusterSettings {
         maxClusters: number;
         cooldownMs: number;
         regroup: { minMs: number; perSoldierMs: number; maxMs: number; maxWaitForReturnMs: number };
-        /** Freshly split clusters rush out to their place this many times faster, for at most launchMs. */
+        /** Freshly split clusters shoot out this many times faster, for at most launchMs. */
         launchBoost: number;
         launchMs: number;
+        /** How far past its parent's edge a freshly split cluster shoots (world px). */
+        launchDistance: number;
+        /** Share (0-1) of the extra speed a smaller cluster's size would give it on its own. */
+        smallClusterBonus: number;
         clusterGap: number;
         followSpeedMultiplier: number;
         replanMs: number;
@@ -97,6 +102,10 @@ const STUCK_CHECK_MS = 900;
 const STUCK_DISTANCE = 4;
 /** Only breadcrumbs this close are considered when re-planning (keeps checks short and cheap). */
 const CRUMB_SEARCH_RADIUS = 220;
+/** Clusters heading back to merge move this much faster than holding ones. */
+const RETURN_BOOST = 1.4;
+/** How often each cluster re-picks its aim along the army's route (ms, staggered). */
+const AIM_REPICK_MS = 250;
 
 function wrapCluster (cluster: Cluster, parentId: number | null, splitAt: number, splitDir: Vec2 = { x: 0, y: 0 }): ArmyCluster
 {
@@ -105,9 +114,12 @@ function wrapCluster (cluster: Cluster, parentId: number | null, splitAt: number
         parentId,
         splitAt,
         launchUntil: 0,
+        launchTarget: null,
         splitDir,
         route: { mode: 'direct' },
         nextPlanAt: 0,
+        aim: null,
+        nextAimAt: 0,
         lastCheckPosition: { ...cluster.center.position },
         nextStuckCheckAt: 0,
     };
@@ -323,14 +335,16 @@ export function splitArmy (
         reassignSlots(cluster, settings.formationSpacing);
         reassignSlots(newCluster, settings.formationSpacing);
 
-        // The new half is the original's child: it returns to it later.
-        // It rushes out to its place (so does a split-off cluster that split again;
-        // the main cluster doesn't get the burst).
+        // The new half is the original's child: it returns to it later. It shoots
+        // out ahead toward the mouse (as far as the ground is clear), then
+        // falls back into the blob. The half that stays doesn't move.
         original.splitAt = now;
-        if (original.parentId !== null) original.launchUntil = launchUntil;
         army.parentOf.set(newCluster.id, cluster.id);
         const child = wrapCluster(newCluster, cluster.id, now, { ...forward });
         child.launchUntil = launchUntil;
+        const shot = clusterRadius(left.length, settings.formationSpacing) + clusterRadius(right.length, settings.formationSpacing)
+            + settings.split.launchDistance;
+        child.launchTarget = clearAhead(leftCentre, forward, shot, obstacles, bounds);
         army.clusters.push(child);
         created.push({ ...leftCentre }, { ...rightCentre });
     }
@@ -366,23 +380,27 @@ export function updatePlayerArmy (
     repairFamily(army);
 
     const plan = planRegroup(army, now, settings);
-    const targets = clusterTargets(army, plan, obstacles, bounds, settings);
+    const armySpeed = movement.maxSpeed * armySpeedMultiplier(army, settings);
+    const targets = clusterTargets(army, plan, now, obstacles);
 
     // The lead: player-controlled, speed set by the largest cluster, slowed if the army lags.
     // It walks a route around obstacles toward where the player points.
-    const armySpeed = movement.maxSpeed * armySpeedMultiplier(army, settings);
-    const leadTuning = { ...movement, maxSpeed: armySpeed * leashFactor(army, targets, settings) };
+    const leadTuning = { ...movement, maxSpeed: armySpeed * leashFactor(army, plan, targets, settings) };
     const steer = steerAround(army.nav, army.lead.center.position, input, now, obstacles, bounds);
     updateMover(army.lead.center, steer, dt, bounds, leadTuning, obstacles);
     updateCluster(army.lead, dt, now, obstacles, bounds, settings); // heading + breadcrumbs only (no soldiers)
 
-    // Every cluster follows its place, then its soldiers follow the cluster.
+    // Every cluster heads for its target, the clusters push each other into a
+    // blob, then each cluster's soldiers follow it.
+    const blob = blobRadius(army.clusters, settings);
     for (const ac of army.clusters)
     {
         const target = targets.get(ac) ?? army.lead.center.position;
-        steerCluster(ac, target, army, plan, armySpeed, dt, now, obstacles, bounds, settings, movement);
-        updateCluster(ac.cluster, dt, now, obstacles, bounds, settings);
+        const catchingUp = isBehind(ac, army, blob);
+        steerCluster(ac, target, army, plan, armySpeed, catchingUp, dt, now, obstacles, bounds, settings, movement);
     }
+    packClusters(army, plan, obstacles, bounds, settings);
+    for (const ac of army.clusters) updateCluster(ac.cluster, dt, now, obstacles, bounds, settings);
 
     const merges = mergeReturning(army, plan, settings);
     updateRepresentative(army);
@@ -394,56 +412,34 @@ export function updatePlayerArmy (
 // ---------------------------------------------------------------------------
 
 /**
- * Holding clusters get spots arranged around the lead (a small sunflower
- * pattern spaced so they don't touch). Returning clusters head for their
- * parent so they merge into it.
+ * Like agar.io cells: every holding cluster heads for where the player is
+ * steering (the pointer, or the next waypoint of the army's route around
+ * obstacles), each at its own speed, and `packClusters` pushes them apart
+ * so they never overlap. Nothing tethers a cluster to the steering point:
+ * a quick small cluster that lunged ahead stays ahead and keeps going. When
+ * the army stands still they all gather around the steering point. A freshly
+ * split cluster first shoots out to its launch point. Returning clusters
+ * head for their parent so they merge into it.
  */
-function clusterTargets (army: PlayerArmy, plan: RegroupPlan, obstacles: ObstacleMap, bounds: Rect, settings: PlayerArmySettings): Map<ArmyCluster, Vec2>
+function clusterTargets (army: PlayerArmy, plan: RegroupPlan, now: number, obstacles: ObstacleMap): Map<ArmyCluster, Vec2>
 {
     const targets = new Map<ArmyCluster, Vec2>();
     const lead = army.lead.center.position;
-    const radius = (ac: ArmyCluster) => clusterRadius(ac.cluster.warriors.length, settings.formationSpacing);
-    const gap = settings.split.clusterGap;
+    const goal = army.nav.goal ? navigationGoal(army.nav) ?? lead : lead;
 
-    // Every cluster's place: the root on the lead; each split-off cluster just
-    // ahead of its parent, in the direction it was split toward. A split never
-    // moves the parent, and a returning cluster never moves anyone else.
-    const parents = new Map<ArmyCluster, ArmyCluster | null>();
-    for (const ac of army.clusters) parents.set(ac, findParent(army, ac));
-    const spots = new Map<ArmyCluster, Vec2>();
-    const spotOf = (ac: ArmyCluster, depth = 0): Vec2 => {
-        const known = spots.get(ac);
-        if (known) return known;
-        const parent = parents.get(ac) ?? null;
-        const dir = ac.splitDir;
-        let spot: Vec2;
-        if (!parent || depth > army.clusters.length || (dir.x === 0 && dir.y === 0)) spot = { x: lead.x, y: lead.y };
-        else
-        {
-            const base = spotOf(parent, depth + 1);
-            let reach = radius(parent) + radius(ac) + gap;
-            // Earlier siblings sent the same way: line up beyond them, not on top.
-            for (const other of army.clusters)
-            {
-                if (other === ac || parents.get(other) !== parent || other.cluster.id > ac.cluster.id) continue;
-                if (other.splitDir.x * dir.x + other.splitDir.y * dir.y > 0.7) reach += radius(other) * 2 + gap;
-            }
-            const wanted = { x: base.x + dir.x * reach, y: base.y + dir.y * reach };
-            spot = freeTowardLead(lead, { x: wanted.x - lead.x, y: wanted.y - lead.y }, obstacles, bounds);
-        }
-        spots.set(ac, spot);
-        return spot;
-    };
+    for (const ac of plan.holding)
+    {
+        if (ac.launchUntil > 0 && ac.launchTarget) targets.set(ac, ac.launchTarget);
+        else targets.set(ac, aimFor(ac, army, now, obstacles));
+    }
 
-    for (const ac of plan.holding) targets.set(ac, spotOf(ac));
-
-    // Regrouping: the smaller group runs back to the bigger one, which holds its spot.
+    // Regrouping: the smaller group runs back to the bigger one, which holds its place in the blob.
     for (const [ac, parent] of plan.returning)
     {
         if (ac.cluster.warriors.length <= parent.cluster.warriors.length) targets.set(ac, parent.cluster.center.position);
         else
         {
-            targets.set(ac, spotOf(ac));
+            targets.set(ac, goal);
             targets.set(parent, ac.cluster.center.position);
         }
     }
@@ -451,16 +447,150 @@ function clusterTargets (army: PlayerArmy, plan: RegroupPlan, obstacles: Obstacl
     return targets;
 }
 
-/** The lead + offset, pulled in toward the lead if that spot is inside an obstacle. */
-function freeTowardLead (lead: Vec2, offset: Vec2, obstacles: ObstacleMap, bounds: Rect): Vec2
+/**
+ * A cluster's own cruising speed. Smaller clusters are a little quicker than
+ * the army (fewer soldiers to move): part of the way from the army's speed
+ * (set by the largest cluster) to the speed their own size would give.
+ */
+function clusterBaseSpeed (ac: ArmyCluster, armySpeed: number, settings: PlayerArmySettings, movement: MovementTuning): number
 {
-    for (let t = 1; t > 0.05; t -= 0.15)
+    const own = movement.maxSpeed * speedMultiplier(ac.cluster.warriors.length, settings.speedCurve, settings.minSpeedMultiplier);
+    return armySpeed + Math.max(0, own - armySpeed) * settings.split.smallClusterBonus;
+}
+
+/**
+ * Where a holding cluster heads: straight for the player's goal if it can
+ * walk there, else the furthest point of the army's route it can walk
+ * straight to (so a cluster that lunged ahead never turns back for a
+ * waypoint it has already passed). The steering point when the army stands
+ * still, waits at the end of a blocked route, or nothing on the route is in
+ * a straight line (the cluster then follows the army's footsteps).
+ */
+function aimFor (ac: ArmyCluster, army: PlayerArmy, now: number, obstacles: ObstacleMap): Vec2
+{
+    const lead = army.lead.center.position;
+    const nav = army.nav;
+    if (!nav.goal) { ac.aim = null; return lead; }
+    if (ac.aim && now < ac.nextAimAt) return ac.aim;
+
+    const from = ac.cluster.center.position;
+    const path = nav.path;
+    let aim: Vec2 = lead;
+    if (path.length === 0) aim = nav.goal; // the army's own way there is straight
+    else if (!nav.partial && hasDryPath(obstacles, from, nav.goal)) aim = nav.goal;
+    else
     {
-        const p = { x: lead.x + offset.x * t, y: lead.y + offset.y * t };
-        const inside = p.x >= bounds.x && p.x <= bounds.x + bounds.width && p.y >= bounds.y && p.y <= bounds.y + bounds.height;
-        if (inside && !obstacles.overlaps(bodyRect(p.x, p.y, CENTER_BODY))) return p;
+        for (let k = path.length - 1; k >= nav.index; k--)
+        {
+            if (hasClearPath(obstacles, from, path[k])) { aim = path[k]; break; }
+        }
     }
-    return lead;
+    ac.aim = aim;
+    ac.nextAimAt = now + AIM_REPICK_MS * (0.8 + (ac.cluster.id % 5) / 10);
+    return aim;
+}
+
+/**
+ * Has this cluster fallen behind the army? It's beyond the blob's edge and
+ * on the far side of the steering point from where the army is heading (or
+ * simply beyond the edge, when the army stands still). Clusters ahead of
+ * the steering point are never "behind": nothing pulls them back.
+ */
+function isBehind (ac: ArmyCluster, army: PlayerArmy, blob: number): boolean
+{
+    const p = ac.cluster.center.position;
+    const lead = army.lead.center.position;
+    const dx = p.x - lead.x;
+    const dy = p.y - lead.y;
+    if (Math.hypot(dx, dy) <= blob) return false;
+    const goal = army.nav.goal;
+    if (!goal) return true;
+    return dx * (goal.x - lead.x) + dy * (goal.y - lead.y) < 0;
+}
+
+/** Radius of the blob the holding clusters pack into (their areas added up, with a little slack). */
+function blobRadius (clusters: readonly ArmyCluster[], settings: PlayerArmySettings): number
+{
+    let area = 0;
+    for (const ac of clusters)
+    {
+        const r = clusterRadius(ac.cluster.warriors.length, settings.formationSpacing) + settings.split.clusterGap;
+        area += r * r;
+    }
+    return Math.sqrt(area) * 1.2;
+}
+
+/**
+ * Push overlapping clusters apart (a few relaxation passes), so split
+ * clusters touch but never overlap, like agar.io cells. Bigger clusters
+ * give way less. A cluster heading back to merge, and the one it merges
+ * into, pass through the others. Never pushes a centre into a wall.
+ */
+function packClusters (army: PlayerArmy, plan: RegroupPlan, obstacles: ObstacleMap, bounds: Rect, settings: PlayerArmySettings): void
+{
+    const solid = army.clusters.filter((ac) => !plan.returning.has(ac) && ac.cluster.warriors.length > 0);
+    if (solid.length < 2) return;
+    const radius = solid.map((ac) => clusterRadius(ac.cluster.warriors.length, settings.formationSpacing));
+    const weight = solid.map((ac) => ac.cluster.warriors.length);
+    const gap = settings.split.clusterGap;
+
+    for (let pass = 0; pass < 3; pass++)
+    {
+        for (let i = 0; i < solid.length; i++)
+        {
+            for (let j = i + 1; j < solid.length; j++)
+            {
+                const a = solid[i].cluster.center.position;
+                const b = solid[j].cluster.center.position;
+                let dx = b.x - a.x;
+                let dy = b.y - a.y;
+                const wanted = radius[i] + radius[j] + gap;
+                if (Math.abs(dx) >= wanted || Math.abs(dy) >= wanted) continue;
+                let d = Math.hypot(dx, dy);
+                if (d >= wanted) continue;
+                if (d < 0.01)
+                {
+                    // Exactly on top of each other: split them sideways, a stable way.
+                    dx = (solid[i].cluster.id % 2 ? 1 : -1); dy = 0.3; d = Math.hypot(dx, dy);
+                }
+                const overlap = (wanted - d) * 0.5; // half per pass keeps it smooth
+                const ux = dx / d, uy = dy / d;
+                const share = weight[i] / (weight[i] + weight[j]); // the heavier one moves less
+                nudge(a, -ux * overlap * (1 - share), -uy * overlap * (1 - share), obstacles, bounds);
+                nudge(b, ux * overlap * share, uy * overlap * share, obstacles, bounds);
+            }
+        }
+    }
+}
+
+/** Move a cluster centre by (dx, dy), or as much of it as stays clear of walls. */
+function nudge (p: Vec2, dx: number, dy: number, obstacles: ObstacleMap, bounds: Rect): void
+{
+    const full = { x: p.x + dx, y: p.y + dy };
+    if (standable(full, obstacles, bounds)) { p.x = full.x; p.y = full.y; return; }
+    // Slide along the wall: try each axis on its own.
+    if (standable({ x: p.x + dx, y: p.y }, obstacles, bounds)) p.x += dx;
+    else if (standable({ x: p.x, y: p.y + dy }, obstacles, bounds)) p.y += dy;
+}
+
+/** Is a cluster centre allowed to stand here (inside the map, not in a wall)? */
+function standable (p: Vec2, obstacles: ObstacleMap, bounds: Rect): boolean
+{
+    const inside = p.x >= bounds.x && p.x <= bounds.x + bounds.width && p.y >= bounds.y && p.y <= bounds.y + bounds.height;
+    return inside && !obstacles.overlaps(bodyRect(p.x, p.y, CENTER_BODY));
+}
+
+/** The furthest point up to `length` px from `from` along `dir` that can be reached in a straight line. */
+function clearAhead (from: Vec2, dir: Vec2, length: number, obstacles: ObstacleMap, bounds: Rect): Vec2
+{
+    let best = { ...from };
+    for (let s = 12; s <= length; s += 12)
+    {
+        const p = { x: from.x + dir.x * s, y: from.y + dir.y * s };
+        if (!standable(p, obstacles, bounds)) break;
+        best = p;
+    }
+    return best;
 }
 
 /**
@@ -471,15 +601,21 @@ function freeTowardLead (lead: Vec2, offset: Vec2, obstacles: ObstacleMap, bound
  * it would stall the whole army. Stragglers catch up on their own (they move
  * faster than the army and follow its breadcrumbs).
  */
-function leashFactor (army: PlayerArmy, targets: Map<ArmyCluster, Vec2>, settings: PlayerArmySettings): number
+function leashFactor (army: PlayerArmy, plan: RegroupPlan, targets: Map<ArmyCluster, Vec2>, settings: PlayerArmySettings): number
 {
     const lags: { lag: number; weight: number }[] = [];
     let totalWeight = 0;
+    const lead = army.lead.center.position;
+    // Clusters packed around the lead aren't lagging until they're beyond the blob's edge.
+    const blob = blobRadius(army.clusters, settings);
     for (const ac of army.clusters)
     {
         let lag = 0;
         const target = targets.get(ac);
-        if (target) lag = distance(ac.cluster.center.position, target);
+        if (ac.launchUntil > 0) lag = 0;
+        // A cluster ahead of the army never holds it back (no tether); only one left behind does.
+        else if (!plan.returning.has(ac)) lag = isBehind(ac, army, blob) ? distance(ac.cluster.center.position, lead) - blob : 0;
+        else if (target) lag = distance(ac.cluster.center.position, target);
         if (ac.cluster.warriors.length > 0) lag = Math.max(lag, distance(ac.cluster.center.position, centroid(ac.cluster.warriors)));
         const weight = Math.max(1, ac.cluster.warriors.length);
         lags.push({ lag, weight });
@@ -510,7 +646,7 @@ function leashFactor (army: PlayerArmy, targets: Map<ArmyCluster, Vec2>, setting
  * stuck. Routes are re-planned a few times a second, not every frame.
  */
 function steerCluster (
-    ac: ArmyCluster, target: Vec2, army: PlayerArmy, plan: RegroupPlan, armySpeed: number, dt: number, now: number,
+    ac: ArmyCluster, target: Vec2, army: PlayerArmy, plan: RegroupPlan, armySpeed: number, catchingUp: boolean, dt: number, now: number,
     obstacles: ObstacleMap, bounds: Rect, settings: PlayerArmySettings, movement: MovementTuning,
 ): void
 {
@@ -557,29 +693,23 @@ function steerCluster (
     let throttle = arriving ? Math.min(1, d / 16) : 1;
     if (d > 0.5) { dx /= d; dy /= d; } else { dx = 0; dy = 0; throttle = 0; }
 
-    // Keep a visible gap from neighbouring split clusters (not while returning).
-    if (!plan.returning.has(ac))
+    // Freshly split: shoot out to the launch point, then fall back into the blob.
+    if (ac.launchUntil > 0 && (now >= ac.launchUntil || (arriving && d < 10)))
     {
-        const push = clusterSeparation(ac, army, plan, settings);
-        dx = dx * throttle + push.x;
-        dy = dy * throttle + push.y;
-        throttle = 1;
+        ac.launchUntil = 0;
+        ac.launchTarget = null;
     }
-
-    // Freshly split: rush out to its place, then settle to normal speed.
-    if (ac.launchUntil > 0 && (now >= ac.launchUntil || (arriving && d < 10))) ac.launchUntil = 0;
     const launching = ac.launchUntil > 0;
-    const speed = armySpeed * settings.split.followSpeedMultiplier * (launching ? settings.split.launchBoost : 1);
+    // Heading back to merge: hurry (as fast as the soldiers can keep up), since
+    // the cluster it merges into keeps marching with the army.
+    const boost = launching ? settings.split.launchBoost : plan.returning.has(ac) ? RETURN_BOOST : 1;
+    // Its own cruising speed; the extra follow speed only to catch up when it has fallen behind.
+    const follow = catchingUp || launching || plan.returning.has(ac) ? settings.split.followSpeedMultiplier : 1;
+    let speed = clusterBaseSpeed(ac, armySpeed, settings, movement) * follow * boost;
+    // Never outrun its own soldiers (except the short burst right after a split).
+    if (!launching) speed = Math.min(speed, settings.warriorSpeed * settings.catchUpMultiplier);
     if (launching) throttle = 1;
     const input = { x: dx * throttle, y: dy * throttle };
-    // Holding its place in the army: move WITH the lead, plus the correction
-    // above, so the cluster turns the moment the player does instead of
-    // sliding on toward where its spot used to be.
-    if (arriving && !plan.returning.has(ac) && speed > 0)
-    {
-        input.x += lead.center.velocity.x / speed;
-        input.y += lead.center.velocity.y / speed;
-    }
     updateMover(centre, input, dt, bounds, { ...movement, maxSpeed: speed }, obstacles);
 
     // Stuck? Find a way round: a short local search first, then a wider path
@@ -611,9 +741,13 @@ function planFollow (from: Vec2, target: Vec2, lead: Cluster, obstacles: Obstacl
     // lead's footsteps go round walls and over bridges).
     const trail = lead.trail;
     let wetCrumb = -1;
+    // Never step back: footsteps further from the target than we already are
+    // (e.g. behind a cluster that lunged ahead) are no use.
+    const toGo = distance(from, target);
     for (let i = trail.length - 1; i >= 0; i--)
     {
         if (distance(trail[i], from) > CRUMB_SEARCH_RADIUS) continue;
+        if (distance(trail[i], target) >= toGo) continue;
         if (!hasClearPath(obstacles, from, trail[i])) continue;
         if (!wadesBetween(obstacles, from, trail[i])) return { mode: 'trail', index: i, shiftsAtPlan: lead.trailShifts };
         if (wetCrumb < 0) wetCrumb = i;
@@ -623,29 +757,6 @@ function planFollow (from: Vec2, target: Vec2, lead: Cluster, obstacles: Obstacl
 
     if (current.mode === 'trail') return current;
     return { mode: 'direct' };
-}
-
-/** Gentle push away from other split clusters that are too close. */
-function clusterSeparation (ac: ArmyCluster, army: PlayerArmy, plan: RegroupPlan, settings: PlayerArmySettings): Vec2
-{
-    const me = ac.cluster;
-    const myRadius = clusterRadius(me.warriors.length, settings.formationSpacing);
-    let px = 0;
-    let py = 0;
-    for (const other of army.clusters)
-    {
-        if (other === ac || plan.returning.has(other)) continue;
-        const wanted = myRadius + clusterRadius(other.cluster.warriors.length, settings.formationSpacing) + settings.split.clusterGap;
-        const dx = me.center.position.x - other.cluster.center.position.x;
-        const dy = me.center.position.y - other.cluster.center.position.y;
-        const d = Math.hypot(dx, dy);
-        if (d >= wanted) continue;
-        const strength = (wanted - d) / wanted;
-        if (d < 0.01) { px += me.id % 2 ? strength : -strength; continue; }
-        px += (dx / d) * strength;
-        py += (dy / d) * strength;
-    }
-    return { x: px, y: py };
 }
 
 // ---------------------------------------------------------------------------
