@@ -17,7 +17,7 @@ export const GameConfig = {
     camera: {
         /** Zoom at the start of a match (2 = every art pixel becomes a 2x2 block on screen). */
         zoom: 2.6,
-        /** 0..1 — lower is a softer, more delayed camera follow. */
+        /** 0..1 â€” lower is a softer, more delayed camera follow. */
         followLerp: 0.1,
         /**
          * Dynamic zoom: close in for small armies, out for big or split ones.
@@ -141,13 +141,24 @@ export const GameConfig = {
             regroup: { minMs: 3000, perSoldierMs: 200, maxMs: 18_000, maxWaitForReturnMs: 8000 },
             /**
              * A split is aimed at the mouse: the front half of each cluster breaks
-             * off. Fresh clusters rush out to their place launchBoost times
-             * faster, for at most launchMs.
+             * off and shoots launchDistance px past its parent's edge, launchBoost
+             * times faster, for at most launchMs. Then it falls back into the blob.
              */
-            launchBoost: 1.5,
-            launchMs: 1000,
-            /** Visible gap kept between neighbouring clusters' edges (world px). */
-            clusterGap: 12,
+            launchBoost: 2.2,
+            launchMs: 700,
+            launchDistance: 90,
+            /**
+             * Smaller split clusters move a little faster than the army: they get
+             * this share of the extra speed their own size would give them on the
+             * speedCurve (0 = all clusters equal, 1 = full size-based speed).
+             */
+            smallClusterBonus: 0.5,
+            /**
+             * Split clusters all head for the same point (where you steer) and
+             * push each other apart, so they pack into one tight blob like
+             * agar.io cells. This is the gap kept between their edges (world px).
+             */
+            clusterGap: 10,
             /** Cluster centres may move this much faster than the army to keep up / converge. */
             followSpeedMultiplier: 1.35,
             /** How often each cluster re-plans its route around obstacles (ms). */

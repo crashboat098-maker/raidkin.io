@@ -45,11 +45,26 @@ export interface Navigator {
     partial: boolean;
     nextPlanAt: number;
     lastDir: Vec2;
+    /** Where the player is steering to (the pointer, or a point ahead for keys); null when standing still. */
+    goal: Vec2 | null;
 }
 
 export function createNavigator (): Navigator
 {
-    return { path: [], index: 0, partial: false, nextPlanAt: 0, lastDir: { x: 0, y: 0 } };
+    return { path: [], index: 0, partial: false, nextPlanAt: 0, lastDir: { x: 0, y: 0 }, goal: null };
+}
+
+/**
+ * Where split clusters should head right now: the next waypoint of the
+ * route around obstacles, else the player's goal itself. Null when the
+ * army is standing still (or its route ends short and it's waiting).
+ */
+export function navigationGoal (nav: Navigator): Vec2 | null
+{
+    if (!nav.goal) return null;
+    const point = nav.path[nav.index];
+    if (point) return point;
+    return nav.partial ? null : nav.goal;
 }
 
 /**
@@ -63,11 +78,13 @@ export function steerAround (nav: Navigator, from: Vec2, input: SteerInput, now:
     {
         nav.path = [];
         nav.partial = false;
+        nav.goal = null;
         return { x: 0, y: 0 };
     }
     const length = Math.hypot(input.x, input.y);
     const dir = { x: input.x / length, y: input.y / length };
     const reach = Math.min(MAX_REACH, input.reach ?? LOOKAHEAD);
+    nav.goal = clampTo(bounds, { x: from.x + dir.x * reach, y: from.y + dir.y * reach });
 
     const turned = dir.x * nav.lastDir.x + dir.y * nav.lastDir.y < REPLAN_TURN_DOT;
     if (now >= nav.nextPlanAt || turned)
