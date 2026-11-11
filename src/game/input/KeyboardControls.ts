@@ -1,4 +1,5 @@
 import { Input, Scene } from 'phaser';
+import type { SteerInput } from '../logic/Navigation';
 import type { Vec2 } from '../logic/Types';
 import { TouchControls } from './TouchControls';
 
@@ -90,7 +91,7 @@ export class KeyboardControls
      * Movement direction, each axis -1..1. Held keys win, then the joystick;
      * otherwise the army heads for the mouse pointer.
      */
-    getMoveDirection (armyPosition: Vec2): Vec2
+    getMoveDirection (armyPosition: Vec2): SteerInput
     {
         const keys = this.keyDirection();
         if (keys) return keys;
@@ -131,7 +132,7 @@ export class KeyboardControls
         return this.scene.cameras.main.getWorldPoint(pointer.x, pointer.y);
     }
 
-    private mouseDirection (armyPosition: Vec2): Vec2
+    private mouseDirection (armyPosition: Vec2): SteerInput
     {
         if (!this.mouseActive || !this.scene.input.manager.isOver) return { x: 0, y: 0 };
 
@@ -144,6 +145,7 @@ export class KeyboardControls
 
         const strength = Math.min(1, (screenDistance - MOUSE_DEAD_ZONE) / (MOUSE_FULL_SPEED - MOUSE_DEAD_ZONE));
         const length = Math.hypot(dx, dy);
-        return { x: (dx / length) * strength, y: (dy / length) * strength };
+        // `reach`: the army plans a route to the pointer itself (around walls, over bridges).
+        return { x: (dx / length) * strength, y: (dy / length) * strength, reach: length };
     }
 }

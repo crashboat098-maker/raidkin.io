@@ -173,12 +173,13 @@ export const DECORATION_COLLIDERS: Partial<Record<DecorationKind, { width: numbe
 
 /**
  * Decorations that have a solid base for map generation (spacing, roads)
- * but that armies can walk straight through: trees. Bushes and other
+ * but that armies can walk straight through: trees and giant mushrooms. Bushes and other
  * plants have no collider at all. Rocks, logs, ruins and buildings stay solid.
  */
 const WALK_THROUGH_DECORATIONS: ReadonlySet<DecorationKind> = new Set<DecorationKind>([
     'largeTree', 'pine', 'deadTree', 'elderTree', 'birch', 'willow', 'charredTree', 'moonTree', 'spiralTree',
     'goldenOak', 'cypress', 'twistedYew', 'scorchedTree', 'swampTree',
+    'giantShroom',
 ]);
 
 /** The collider that blocks movement in play (null if armies can walk through it). */

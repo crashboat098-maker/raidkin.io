@@ -1,4 +1,5 @@
 import type { Rect, Vec2 } from './Types';
+import { isLava, type LavaLayout } from './LavaRivers';
 import { isWater, type WaterLayout } from './Water';
 
 /**
@@ -26,6 +27,14 @@ export interface MoveResult {
 const CELL_SIZE = 64;
 /** Tiny gap left between a body and a wall after being pushed out. */
 const EPSILON = 0.01;
+/** Route-planning cost of a step through lava (dry ground is 1). */
+const LAVA_COST = 12;
+/**
+ * Water is costed this many times worse than it really is (it's slow, and
+ * soldiers fight badly knee-deep), so armies take a nearby bridge, like
+ * people would, and only wade when the bridge is far.
+ */
+const WATER_DISLIKE = 3;
 
 export class ObstacleMap
 {
@@ -35,7 +44,11 @@ export class ObstacleMap
      * @param water Optional shallow water: walkable, but anything standing in it
      *   moves at `waterSlowdown` of its normal speed.
      */
-    constructor (readonly obstacles: readonly Rect[], readonly water: WaterLayout | null = null, readonly waterSlowdown = 1)
+    constructor (
+        readonly obstacles: readonly Rect[], readonly water: WaterLayout | null = null, readonly waterSlowdown = 1,
+        /** Lava rivers: walkable but burning, so routes avoid them when they can. */
+        readonly lava: LavaLayout | null = null,
+    )
     {
         for (const rect of obstacles)
         {
@@ -51,6 +64,16 @@ export class ObstacleMap
     speedFactorAt (x: number, y: number): number
     {
         return this.water && isWater(this.water, x, y) ? this.waterSlowdown : 1;
+    }
+
+    /**
+     * How costly walking over (x, y) is when planning a route: 1 on dry ground
+     * or a bridge, more in water (it's slow) and much more in lava (it burns).
+     */
+    travelCost (x: number, y: number): number
+    {
+        if (this.lava && isLava(this.lava, x, y)) return LAVA_COST;
+        return this.water && isWater(this.water, x, y) ? WATER_DISLIKE / Math.max(0.1, this.waterSlowdown) : 1;
     }
 
     /** Is (x, y) in water? */

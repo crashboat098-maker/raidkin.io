@@ -25,10 +25,15 @@ export const PROTOCOL_VERSION = 4;
 // ---------------------------------------------------------------------------
 
 export type ClientMessage =
-    | { t: 'join'; v: number; name: string; color: string }
+    /**
+     * `resume`: the token from an earlier 'joined', to take back an army whose
+     * connection dropped (kept for a while on the server). `resumeOnly`: if it
+     * can't be taken back, don't start a new army (answer 'expired' instead).
+     */
+    | { t: 'join'; v: number; name: string; color: string; resume?: string; resumeOnly?: boolean }
     | { t: 'leave' }
-    /** Steering direction, each axis -1..1. */
-    | { t: 'in'; x: number; y: number }
+    /** Steering direction, each axis -1..1, and (mouse) how far away the target is. */
+    | { t: 'in'; x: number; y: number; r?: number }
     | { t: 'split'; x: number; y: number }
     | { t: 'surrender'; x: number; y: number };
 
@@ -37,8 +42,12 @@ export type ClientMessage =
 // ---------------------------------------------------------------------------
 
 export interface LobbyMessage { t: 'lobby'; online: number; playing: number; full: boolean }
-export interface JoinedMessage { t: 'joined'; id: string }
-export interface ErrorMessage { t: 'error'; reason: 'version' | 'full' }
+/** `token` takes this army back after a dropped connection; `resumed` = it's an army you had before. */
+export interface JoinedMessage { t: 'joined'; id: string; token?: string; resumed?: boolean }
+export interface ErrorMessage { t: 'error'; reason: 'version' | 'full' | 'expired' }
+
+/** How long the server keeps an army whose player's connection dropped, so they can rejoin. */
+export const REJOIN_GRACE_MS = 40_000;
 
 /** Sent right after joining: what can't be rebuilt from the map seed. */
 export interface StateMessage {

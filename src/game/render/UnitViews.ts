@@ -330,6 +330,17 @@ export class ArmyLabels
 
     sync (players: readonly Player[]): void
     {
+        // Players who left the match take their name tag with them.
+        if (this.labels.size > players.length || players.some((p) => !this.labels.has(p.id)))
+        {
+            const present = new Set(players.map((p) => p.id));
+            for (const [id, label] of this.labels)
+            {
+                if (present.has(id)) continue;
+                label.destroy();
+                this.labels.delete(id);
+            }
+        }
         for (const p of players)
         {
             let label = this.labels.get(p.id);
@@ -342,6 +353,7 @@ export class ArmyLabels
                     .setDepth(850_000);
                 this.labels.set(p.id, label);
             }
+            if (label.text !== p.name) label.setText(p.name);
             const warriors = allWarriors(p.army);
             const alive = p.respawnAt === null && warriors.length > 0;
             label.setVisible(alive);

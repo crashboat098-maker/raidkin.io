@@ -8,6 +8,7 @@ import type { DefeatStats, GameWorld } from '../logic/GameWorld';
 import { NeutralForces, type NeutralWarrior } from '../logic/Neutrals';
 import { ObstacleMap } from '../logic/Obstacles';
 import { createMover, updateMover, type MoverState } from '../logic/Movement';
+import { createNavigator, steerAround, type SteerInput } from '../logic/Navigation';
 import { createIdSource, type Player } from '../logic/Player';
 import { createPlayerArmy } from '../logic/PlayerArmy';
 import { createPlayerResources } from '../logic/PlayerResources';
@@ -16,7 +17,7 @@ import type { Rect, Vec2 } from '../logic/Types';
 import { movementBounds, type WorldEvents } from '../logic/World';
 import type { NetClient } from './NetClient';
 import {
-    CASTLE_STATES, JOIN_RECRUITED, NEUTRAL_AVAILABLE, roleFromCode, WARRIOR_GUARDIAN, NEUTRAL_FACING_LEFT, NEUTRAL_KINDS, NEUTRAL_MOVING, NEUTRAL_READY, PROTOCOL_VERSION,
+    CASTLE_STATES, JOIN_RECRUITED, NEUTRAL_AVAILABLE, roleFromCode, WARRIOR_GUARDIAN, NEUTRAL_FACING_LEFT, NEUTRAL_KINDS, NEUTRAL_MOVING, NEUTRAL_READY, PROTOCOL_VERSION, REJOIN_GRACE_MS,
     WARRIOR_ARCHER, WARRIOR_BURNING, WARRIOR_FACING_LEFT, WARRIOR_MOVING,
     type BodyRow, type DefeatMessage, type RosterRow, type ServerMessage, type SnapPlayer, type SnapshotMessage, type StateMessage, type YouRow,
 } from './Protocol';
@@ -38,6 +39,8 @@ const INTERPOLATION_MS = 110;
 /** Send steering at most this often (and at least this often while it changes). */
 const INPUT_INTERVAL_MS = 50;
 const INPUT_KEEPALIVE_MS = 400;
+/** Resend steering when the distance to the mouse changes by this much (world px). */
+const REACH_RESEND = 24;
 /** Own-army prediction: how far ahead of the server's last word we aim (seconds of travel)... */
 const PREDICTION_LEAD_S = 0.12;
 /** ...how much drift is tolerated while moving, and beyond what distance we just jump (world px). */
@@ -74,8 +77,12 @@ export class NetWorld implements GameWorld
     readonly castles: CastleStatus[];
     matchStartedAt: number | null = null;
     humanDefeated = false;
-    /** The connection dropped mid-match. */
+    /** The connection dropped mid-match and the army couldn't be taken back. */
     disconnected = false;
+    /** The connection dropped; trying to get back to our army (kept by the server for a while). */
+    reconnecting = false;
+    private droppedAt = 0;
+    private rejoinSent = false;
     /** Joined and given the starting state: ready to draw. */
     ready = false;
     /** The server turned us away. */
@@ -96,7 +103,9 @@ export class NetWorld implements GameWorld
     private you: YouRow | null = null;
     private defeat: DefeatMessage | null = null;
     private firstApply = true;
-    private lastInput: Vec2 = { x: 0, y: 0 };
+    private lastInput: SteerInput = { x: 0, y: 0 };
+    /** Our own route around obstacles, worked out here too so prediction follows the server's path. */
+    private readonly nav = createNavigator();
     private lastInputSentAt = 0;
     /** Events gathered from messages that arrived between frames (state on joining). */
     private queued: WorldEvents = emptyWorldEvents();
@@ -109,7 +118,7 @@ export class NetWorld implements GameWorld
     constructor (private readonly config: Config, private readonly net: NetClient, name: string, color: string)
     {
         this.layout = generateBattlefield(config.world);
-        this.obstacles = new ObstacleMap(this.layout.obstacles, this.layout.water, config.water.slowdown);
+        this.obstacles = new ObstacleMap(this.layout.obstacles, this.layout.water, config.water.slowdown, this.layout.lava);
         this.moveBounds = movementBounds(this.layout);
         // Same seeds as the server, so shard ids and neutral sites line up with it.
         this.shards = new SoulShardField(this.layout, config.soulShards, config.world.seed + 1);
@@ -121,23 +130,75 @@ export class NetWorld implements GameWorld
         }));
         this.human = this.makePlayer('you', name, color, 'human', this.layout.spawn);
 
-        net.listen((m) => this.receive(m), () => { this.disconnected = true; });
-        net.send({ t: 'join', v: PROTOCOL_VERSION, name, color });
+        net.listen((m) => this.receive(m), () => this.dropped());
+        // An army left waiting after this browser lost its connection (refresh, closed tab) is taken back.
+        const resume = loadRejoinToken();
+        net.send(resume ? { t: 'join', v: PROTOCOL_VERSION, name, color, resume } : { t: 'join', v: PROTOCOL_VERSION, name, color });
     }
 
-    /** Stop listening (the scene is closing). */
+    /** Stop listening (the scene is closing). Leaving on purpose gives up the army. */
     leave (): void
     {
         this.net.listen(null);
         this.net.send({ t: 'leave' });
+        saveRejoinToken(null);
+    }
+
+    /**
+     * The connection dropped. Mid-match, the server keeps our army for
+     * REJOIN_GRACE_MS: wait for the connection to come back and take it back.
+     */
+    private dropped (): void
+    {
+        if (!this.ready || this.humanDefeated)
+        {
+            this.disconnected = true;
+            return;
+        }
+        if (!this.reconnecting) this.droppedAt = performance.now();
+        this.reconnecting = true;
+        this.rejoinSent = false;
+    }
+
+    /** While reconnecting: whole seconds left before the server gives our army up. */
+    rejoinSecondsLeft (): number
+    {
+        return Math.max(0, Math.ceil((REJOIN_GRACE_MS - (performance.now() - this.droppedAt)) / 1000));
+    }
+
+    /** While reconnecting: rejoin once the connection is back; give up when the army is gone. */
+    private tryRejoin (): void
+    {
+        if (performance.now() - this.droppedAt > REJOIN_GRACE_MS)
+        {
+            this.disconnected = true;
+            return;
+        }
+        const token = loadRejoinToken();
+        if (!token)
+        {
+            this.disconnected = true;
+            return;
+        }
+        if (this.rejoinSent || !this.net.online) return;
+        this.net.send({ t: 'join', v: PROTOCOL_VERSION, name: this.human.name, color: this.human.colorId, resume: token, resumeOnly: true });
+        this.rejoinSent = true;
     }
 
     // -----------------------------------------------------------------------
     // GameWorld
     // -----------------------------------------------------------------------
 
-    update (now: number, dt: number, input: Vec2, split: boolean | Vec2 | null, surrender: Vec2 | null): WorldEvents
+    update (now: number, dt: number, input: SteerInput, split: boolean | Vec2 | null, surrender: Vec2 | null): WorldEvents
     {
+        if (this.reconnecting)
+        {
+            this.tryRejoin();
+            // Nothing reaches the server meanwhile: hold still rather than drift away from it.
+            input = { x: 0, y: 0 };
+            split = null;
+            surrender = null;
+        }
         this.sendInput(input, split, surrender);
         const events = this.takeQueued();
         if (this.clockOffset === null) return events;
@@ -148,7 +209,7 @@ export class NetWorld implements GameWorld
             this.apply(this.pending.shift()!, now, events);
         }
         this.interpolate(renderTime);
-        this.predictOwnArmy(input, dt);
+        this.predictOwnArmy(input, now, dt);
         // Castle countdowns tick on between snapshots.
         for (const c of this.castles)
         {
@@ -164,7 +225,7 @@ export class NetWorld implements GameWorld
      * gently pulled toward where the server says it is. Your soldiers are drawn
      * shifted along with it, so the whole army answers your input instantly.
      */
-    private predictOwnArmy (input: Vec2, dt: number): void
+    private predictOwnArmy (rawInput: SteerInput, now: number, dt: number): void
     {
         const latest = this.latestOwnLead();
         const human = this.human;
@@ -178,6 +239,8 @@ export class NetWorld implements GameWorld
         }
         if (!this.predicted) this.predicted = createMover(latest);
 
+        // Walk the same route around obstacles the server plans.
+        const input = steerAround(this.nav, this.predicted.position, rawInput, now, this.obstacles, this.moveBounds);
         const m = this.config.movement;
         updateMover(this.predicted, input, dt, this.moveBounds, { maxSpeed: this.you.speed, acceleration: m.acceleration, deceleration: m.deceleration }, this.obstacles);
 
@@ -262,15 +325,24 @@ export class NetWorld implements GameWorld
     {
         switch (m.t)
         {
-            case 'joined': this.myId = m.id; return;
+            case 'joined':
+                this.myId = m.id;
+                if (m.token) saveRejoinToken(m.token);
+                this.reconnecting = false;
+                return;
             case 'state': this.applyState(m); return;
             case 'snap': this.queueSnapshot(m); return;
             case 'defeat':
                 this.defeat = m;
                 this.humanDefeated = true;
                 this.human.stats.defeatedAt = performance.now();
+                saveRejoinToken(null);
                 return;
-            case 'error': this.refused = m.reason; return;
+            case 'error':
+                // Our army is gone (too late to rejoin): same as a lost connection.
+                if (m.reason === 'expired') { this.disconnected = true; saveRejoinToken(null); }
+                else this.refused = m.reason;
+                return;
             case 'lobby': return;
             case 'roster':
                 this.roster.clear();
@@ -291,14 +363,28 @@ export class NetWorld implements GameWorld
             shard.y = m.shards[i + 2];
             shard.active = m.shards[i + 3] === 1;
         }
+        // Rejoining after a drop: bodies that vanished while we were away go too.
+        const listed = new Set(m.bodies.map((row) => row[0]));
+        for (const [id, body] of this.bodies)
+        {
+            if (listed.has(id)) continue;
+            this.bodies.delete(id);
+            queued.bodiesExpired.push(body);
+        }
         for (const row of m.bodies)
         {
+            const known = this.bodies.get(row[0]);
+            if (known)
+            {
+                if (!known.awake && row[8] === 1) { known.awake = true; queued.bodiesAwakened.push(known); }
+                continue;
+            }
             const body = this.addBody(row, now);
             queued.bodiesFallen.push(body);
             if (body.awake) queued.bodiesAwakened.push(body);
         }
+        if (!this.ready) this.matchStartedAt = now;
         this.ready = true;
-        this.matchStartedAt = now;
     }
 
     private queueSnapshot (m: SnapshotMessage): void
@@ -329,13 +415,16 @@ export class NetWorld implements GameWorld
         while (this.pending.length > 30) this.apply(this.pending.shift()!, performance.now(), this.queued);
     }
 
-    private sendInput (input: Vec2, split: boolean | Vec2 | null, surrender: Vec2 | null): void
+    private sendInput (input: SteerInput, split: boolean | Vec2 | null, surrender: Vec2 | null): void
     {
         const now = performance.now();
-        const changed = Math.abs(input.x - this.lastInput.x) > 0.02 || Math.abs(input.y - this.lastInput.y) > 0.02;
+        const changed = Math.abs(input.x - this.lastInput.x) > 0.02 || Math.abs(input.y - this.lastInput.y) > 0.02
+            || Math.abs((input.reach ?? -1) - (this.lastInput.reach ?? -1)) > REACH_RESEND;
         if ((changed && now - this.lastInputSentAt >= INPUT_INTERVAL_MS) || now - this.lastInputSentAt >= INPUT_KEEPALIVE_MS)
         {
-            this.net.send({ t: 'in', x: round3(input.x), y: round3(input.y) });
+            this.net.send(input.reach === undefined
+                ? { t: 'in', x: round3(input.x), y: round3(input.y) }
+                : { t: 'in', x: round3(input.x), y: round3(input.y), r: Math.round(input.reach) });
             this.lastInput = { ...input };
             this.lastInputSentAt = now;
         }
@@ -668,6 +757,25 @@ function emptyWorldEvents (): WorldEvents
         splits: [], merges: [], surrendered: [], hits: [], deaths: [], eliminated: [], respawned: [],
         bodiesFallen: [], bodiesAwakened: [], bodiesRevived: [], bodiesExpired: [], lavaBurns: [],
     };
+}
+
+/** Where this browser keeps the token that takes back its army after a dropped connection. */
+const REJOIN_KEY = 'raidkin.rejoin';
+
+function loadRejoinToken (): string | null
+{
+    try { return localStorage.getItem(REJOIN_KEY); }
+    catch { return null; }
+}
+
+function saveRejoinToken (token: string | null): void
+{
+    try
+    {
+        if (token) localStorage.setItem(REJOIN_KEY, token);
+        else localStorage.removeItem(REJOIN_KEY);
+    }
+    catch { /* storage blocked: rejoining only works without a page reload */ }
 }
 
 function round3 (n: number): number
