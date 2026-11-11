@@ -160,6 +160,11 @@ export const GameConfig = {
         formationSpacing: 13,
         /** Warrior top speed. Faster than the army's movement so they can keep up. */
         warriorSpeed: 108,
+        /**
+         * Guardians are slower than Warriors (108 x 0.9 = 97 px/s), but still a
+         * touch faster than the army itself ever moves (95), so they never slow it down.
+         */
+        guardianSpeedMultiplier: 0.9,
         /** Extra speed multiplier when a Warrior has fallen far behind. */
         catchUpMultiplier: 1.4,
         /** How quickly a Warrior speeds up and turns (higher = snappier, lower = icier). */
@@ -207,10 +212,35 @@ export const GameConfig = {
          */
         archer: { maxHp: 60, damage: 11, range: 95, attackIntervalMs: 900 },
         /**
+         * Guardians (won by holding a castle): heavy armour and a big shield.
+         * Lots of health, light blows, one swing a second; they hold the front line.
+         */
+        guardian: { maxHp: 180, damage: 8, attackIntervalMs: 1000 },
+        /**
          * Split-off clusters hit softer when small: [cluster size, share of damage].
          * 5 soldiers hit at half damage, 25 or more at full. The main cluster always hits at full.
          */
         clusterDamage: [[5, 0.5], [25, 1]] as const,
+    },
+
+    /**
+     * The three capturable castles (enchanted forest, volcanic wastes, swamp).
+     * Hold the circle alone for `captureMs` to take one; it then grants Guardians.
+     */
+    castles: {
+        captureMs: 30_000,
+        /** Progress drains at half the speed it builds while the capturing army is away. */
+        decayRate: 0.5,
+        /** Guardians granted the moment a castle is taken... */
+        initialGuardians: 3,
+        /** ...then one this often while the owner holds the circle uncontested... */
+        guardianEveryMs: 10_000,
+        /** ...up to this many per capture (the first 3 included)... */
+        maxGuardians: 40,
+        /** ...then the castle rests this long before anyone can take it again. */
+        cooldownMs: 60_000,
+        /** Who stands in each circle is checked this often (ms), not every frame. */
+        checkIntervalMs: 100,
     },
 
     bots: {
@@ -253,6 +283,12 @@ export const GameConfig = {
         pursuitGiveUpMs: 7000,
         /** ...and ignore that army for this long afterwards (ms). */
         pursuitIgnoreMs: 15000,
+
+        // --- Castles ---
+        /** Armies this big go for castles (capture them, and hold the ones they own)... */
+        castleMinSize: 6,
+        /** ...within this distance of their army (world px). */
+        castleSearchRadius: 1500,
 
         /** New armies spawn at least this far from any other army (no spawn camping). */
         spawnClearance: 360,

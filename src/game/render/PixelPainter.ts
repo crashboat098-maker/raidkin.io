@@ -28,6 +28,15 @@ export class PixelPainter
         this.pixels[by * this.bufferWidth + bx] = color;
     }
 
+    /** Erase a pixel back to transparent (e.g. a broken-off piece of wall). */
+    clear (x: number, y: number): void
+    {
+        const bx = Math.round(x) + 1;
+        const by = Math.round(y) + 1;
+        if (bx < 0 || by < 0 || bx >= this.bufferWidth || by >= this.bufferHeight) return;
+        this.pixels[by * this.bufferWidth + bx] = null;
+    }
+
     has (x: number, y: number): boolean
     {
         const bx = Math.round(x) + 1;

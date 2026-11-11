@@ -34,6 +34,10 @@ export const Tex = {
     /** Archer sprite in an army's colour, and its bow-drawn attack frame. */
     archer: (colorId: string) => `archer-${colorId}`,
     archerDraw: (colorId: string) => `archer-draw-${colorId}`,
+    /** Guardian sprite in an army's colour: great helm, heavy plate, a big shield. */
+    guardian: (colorId: string) => `guardian-${colorId}`,
+    /** Banner planted at a castle nobody holds. */
+    CastleBannerNeutral: 'castle-banner-neutral',
     FxBlade: 'fx-blade',
     FxSlash: 'fx-slash',
     FxWind: 'fx-wind',
@@ -257,6 +261,27 @@ const ARCHER_DRAW = [
     '...oo..oo...',
 ];
 
+/**
+ * 13 x 14 Guardian: a closed great helm, broad pauldrons, heavy plate over a
+ * tabard, and a big shield (the army's colour, gold cross) held in front.
+ */
+const GUARDIAN = [
+    '....ooooo....',
+    '...oHHHHho...',
+    '...oHvvvho..o',
+    '...ohhhhho.ow',
+    '..oAAoooAAoow',
+    'ooooAAaaaAAow',
+    'oSSSoTTTaaAgg',
+    'oSCCSoTtTaok.',
+    'oSCgCSoTTao..',
+    'oSgggSoTtao..',
+    'oSCgCSoTTao..',
+    'oSCCCSoaao...',
+    '.oSCSoakoko..',
+    '..oSo.oo.oo..',
+];
+
 /** 18 x 7 fallen Warrior lying on its side, helm to the left, sword dropped beside it. */
 const FALLEN = [
     '.oooo.............',
@@ -422,6 +447,15 @@ export function createPlaceholderTextures (scene: Scene, tileSize: number): void
         };
         textureFromPixelMap(scene, Tex.archer(colorId), ARCHER, archerColors);
         textureFromPixelMap(scene, Tex.archerDraw(colorId), ARCHER_DRAW, archerColors);
+        // Guardians: darker, heavier plate than a Warrior, and a shield in the army's colour.
+        textureFromPixelMap(scene, Tex.guardian(colorId), GUARDIAN, {
+            o: Palette.outline,
+            H: c.armorLight, h: c.helm, v: c.visor,
+            A: c.armorLight, a: c.armor,
+            S: '#9aa1a6', C: colors.main, g: c.gold,
+            T: colors.main, t: colors.dark,
+            w: c.blade, k: c.leather,
+        });
         // The fallen: dulled steel, a darkened tabard.
         textureFromPixelMap(scene, Tex.fallen(colorId), FALLEN, {
             o: Palette.outline,
@@ -430,6 +464,11 @@ export function createPlaceholderTextures (scene: Scene, tileSize: number): void
             g: '#9a7a3a', w: '#9aa1a6', k: c.leather,
         });
     }
+
+    // A free castle's banner: pale cloth with a gold mark.
+    textureFromPixelMap(scene, Tex.CastleBannerNeutral, TEAM_BANNER, {
+        o: Palette.outline, W: Palette.wood.light, C: '#e8dcb8', c: '#a89a70', g: c.gold,
+    });
 
     textureFromPixelMap(scene, Tex.Sylvan, SYLVAN, {
         o: Palette.outline, H: '#4f8f4a', h: '#356a37', f: '#e6c49a', e: '#2a2a1e',

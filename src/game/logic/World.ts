@@ -2,6 +2,7 @@ import type { GameConfig as GameConfigType } from '../config/GameConfig';
 import { addWarrior, findFreeSpotNear, WARRIOR_BODY, type Cluster, type SoldierRole, type Warrior } from './Army';
 import { generateBattlefield, type BattlefieldLayout } from './BattlefieldLayout';
 import { botInput, createBotState, isRetreating } from './BotBrain';
+import { CastleField, type CastleStatus } from './Castles';
 import { assignEngagements, regenerate, removeDead, resolveAttacks, type Death, type Hit } from './Combat';
 import { FallenField, type FallenBody } from './Fallen';
 import { isLava } from './LavaRivers';
@@ -61,6 +62,8 @@ export interface WorldEvents {
     bodiesExpired: FallenBody[];
     /** Soldiers that took a lava burn this frame (each only for its own burn). */
     lavaBurns: Warrior[];
+    /** Castles taken this frame (Guardians granted arrive in `summoned`). */
+    castlesCaptured?: CastleStatus[];
 
     // Only from online play (NetWorld), where the server reports what happened:
     /** Soldiers already there when you joined (shown without an effect). */
@@ -117,6 +120,8 @@ export class World implements GameWorld
     readonly neutrals: NeutralForces;
     /** Bodies of fallen soldiers, waiting to be revived. */
     readonly fallen: FallenField;
+    /** The three capturable castles. */
+    private readonly castleField: CastleField;
     readonly players: Player[] = [];
     readonly human: Player;
     readonly nextUnitId: () => number;
@@ -138,6 +143,7 @@ export class World implements GameWorld
         this.shards = new SoulShardField(this.layout, config.soulShards, config.world.seed + 1);
         this.neutrals = new NeutralForces(this.layout, this.obstacles, config.neutrals, config.world.seed + 2, this.nextUnitId);
         this.fallen = new FallenField(config.fallen);
+        this.castleField = new CastleField(this.layout.castles, config.castles);
 
         this.human = createPlayer('you', this.layout.spawn, this.nextUnitId, {
             name: options.humanName ?? 'YOU', kind: 'human', colorId: options.humanColor ?? 'crimson', size: options.humanSize ?? 1,
@@ -204,6 +210,12 @@ export class World implements GameWorld
         }
         for (const { cluster } of p.army.clusters) cluster.warriors = [];
         return released;
+    }
+
+    /** Every castle's state (owner, capture progress, Guardians granted...). */
+    get castles (): readonly CastleStatus[]
+    {
+        return this.castleField.statuses;
     }
 
     get bots (): Player[]
@@ -287,7 +299,7 @@ export class World implements GameWorld
         // 3. Movement: the human from the keyboard, bots from their brains.
         const botView = {
             players: living, shards: this.shards.shards, neutrals: this.neutrals.units, bodies: this.fallen.recruitable(),
-            obstacles: this.obstacles, bounds: this.layout.playArea, rng: this.rng,
+            castles: this.castleField.statuses, obstacles: this.obstacles, bounds: this.layout.playArea, rng: this.rng,
         };
         const surrenders: [Player, Vec2][] = [];
         for (const p of living)
@@ -425,6 +437,16 @@ export class World implements GameWorld
             }
         }
 
+        // 7c. Castles: capture progress, contests, cooldowns. Guardians granted by a
+        //     castle join their army like summoned soldiers (castle rewards ignore a
+        //     bot's size cap, so a castle always finishes its cycle).
+        const castles = this.castleField.update(dt, stillAlive);
+        for (const { player, count } of castles.awards)
+        {
+            for (let i = 0; i < count; i++) events.summoned.push({ warrior: this.summon(player, 'guardian'), owner: player });
+        }
+        if (castles.captured.length > 0) events.castlesCaptured = castles.captured;
+
         // Track each army's largest size this run.
         for (const p of stillAlive) p.stats.peakArmy = Math.max(p.stats.peakArmy, totalSoldiers(p.army));
 
@@ -521,7 +543,9 @@ export class World implements GameWorld
 
     private maxHpOf (role: SoldierRole): number
     {
-        return role === 'archer' ? this.config.combat.archer.maxHp : this.config.combat.maxHp;
+        if (role === 'archer') return this.config.combat.archer.maxHp;
+        if (role === 'guardian') return this.config.combat.guardian.maxHp;
+        return this.config.combat.maxHp;
     }
 
     private respawn (p: Player): void

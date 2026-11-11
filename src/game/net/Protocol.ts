@@ -1,4 +1,5 @@
-import type { Warrior } from '../logic/Army';
+import type { SoldierRole, Warrior } from '../logic/Army';
+import type { CastleStatus } from '../logic/Castles';
 import type { FallenBody } from '../logic/Fallen';
 import type { NeutralKind, NeutralWarrior } from '../logic/Neutrals';
 import type { Player } from '../logic/Player';
@@ -17,7 +18,7 @@ import type { Vec2 } from '../logic/Types';
  */
 
 /** Bump when the messages change, so old pages are told to reload. */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 // ---------------------------------------------------------------------------
 // Browser -> server
@@ -72,6 +73,26 @@ export interface SnapshotMessage {
     /** [siteId, kind, x, y, flags] per neutral; flags: NEUTRAL_* bits. */
     neutrals: number[];
     events: EventRows;
+    /** Every castle's state (always all three: it's tiny). */
+    castles: CastleRow[];
+}
+
+/**
+ * [index, state (0 neutral / 1 owned / 2 cooldown), ownerNet (-1 none), capturerNet (-1 none),
+ *  progress (0..1000), contested (0/1), guardians awarded, ms to next Guardian (-1 paused), cooldown ms]
+ */
+export type CastleRow = [number, number, number, number, number, number, number, number, number];
+
+export const CASTLE_STATES = ['neutral', 'owned', 'cooldown'] as const;
+
+/** One castle as a snapshot row (`netOf` gives a player's snapshot number). */
+export function castleRow (c: CastleStatus, netOf: (p: Player) => number): CastleRow
+{
+    return [
+        c.site.index, CASTLE_STATES.indexOf(c.state), c.owner ? netOf(c.owner) : -1, c.capturer ? netOf(c.capturer) : -1,
+        Math.round(c.progress * 1000), c.contested ? 1 : 0, c.awarded,
+        c.nextGuardianMs === null ? -1 : Math.round(c.nextGuardianMs), Math.round(c.cooldownMs),
+    ];
 }
 
 export interface SnapPlayer {
@@ -113,7 +134,7 @@ export interface YouRow {
     speed: number;
 }
 
-/** [id, x, y, colorId, facing(1/-1), archer(0/1), readyInMs, expiresInMs, awake(0/1)] */
+/** [id, x, y, colorId, facing(1/-1), role (0 warrior / 1 archer / 2 guardian), readyInMs, expiresInMs, awake(0/1)] */
 export type BodyRow = [number, number, number, string, number, number, number, number, number];
 
 export interface EventRows {
@@ -143,6 +164,18 @@ export const WARRIOR_FACING_LEFT = 1;
 export const WARRIOR_MOVING = 2;
 export const WARRIOR_ARCHER = 4;
 export const WARRIOR_BURNING = 8;
+export const WARRIOR_GUARDIAN = 16;
+
+/** Soldier kinds by number (bodies), and back. */
+const ROLES: readonly SoldierRole[] = ['warrior', 'archer', 'guardian'];
+export function roleCode (role: SoldierRole): number
+{
+    return Math.max(0, ROLES.indexOf(role));
+}
+export function roleFromCode (code: number): SoldierRole
+{
+    return ROLES[code] ?? 'warrior';
+}
 
 export const NEUTRAL_FACING_LEFT = 1;
 export const NEUTRAL_MOVING = 2;
@@ -183,7 +216,7 @@ export function rosterRow (net: number, p: Player): RosterRow
 // Binary snapshots
 //
 // Layout (little-endian):
-//   u8 marker (SNAPSHOT_MARKER), u32 time, u32 tail length, tail (UTF-8 JSON {you, events}),
+//   u8 marker (SNAPSHOT_MARKER), u32 time, u32 tail length, tail (UTF-8 JSON {you, events, castles}),
 //   u16 players, per player:
 //     u16 net, u8 alive, u16 leadX, u16 leadY, i8 headingX, i8 headingY, i32 rep, u32 size,
 //     u32 soldiers sent, per soldier: u32 id, u16 x, u16 y, u16 hp, u8 flags   (11 bytes)
@@ -213,10 +246,10 @@ const decoder = new TextDecoder();
 
 export function encodeSnapshot (
     time: number, you: YouRow | null, events: EventRows,
-    armies: readonly SnapshotArmy[], neutrals: readonly NeutralWarrior[], now: number,
+    armies: readonly SnapshotArmy[], neutrals: readonly NeutralWarrior[], now: number, castles: readonly CastleRow[] = [],
 ): Uint8Array
 {
-    const tail = encoder.encode(JSON.stringify({ you, events }));
+    const tail = encoder.encode(JSON.stringify({ you, events, castles }));
     let size = 1 + 4 + 4 + tail.length + 2 + 4 + neutrals.length * NEUTRAL_BYTES;
     for (const a of armies) size += PLAYER_BYTES + a.warriors.length * SOLDIER_BYTES;
 
@@ -245,7 +278,8 @@ export function encodeSnapshot (
         for (const w of a.warriors)
         {
             const flags = (w.facing < 0 ? WARRIOR_FACING_LEFT : 0) | (w.isMoving ? WARRIOR_MOVING : 0)
-                | (w.role === 'archer' ? WARRIOR_ARCHER : 0) | (w.burningUntil > now ? WARRIOR_BURNING : 0);
+                | (w.role === 'archer' ? WARRIOR_ARCHER : 0) | (w.role === 'guardian' ? WARRIOR_GUARDIAN : 0)
+                | (w.burningUntil > now ? WARRIOR_BURNING : 0);
             v.setUint32(o, w.id, true); o += 4;
             v.setUint16(o, pos(w.position.x), true); o += 2;
             v.setUint16(o, pos(w.position.y), true); o += 2;
@@ -279,7 +313,7 @@ export function decodeSnapshot (buffer: ArrayBuffer): SnapshotMessage | null
         o += 1;
         const time = v.getUint32(o, true); o += 4;
         const tailLength = v.getUint32(o, true); o += 4;
-        const tail = JSON.parse(decoder.decode(new Uint8Array(buffer, o, tailLength))) as { you: YouRow | null; events: EventRows };
+        const tail = JSON.parse(decoder.decode(new Uint8Array(buffer, o, tailLength))) as { you: YouRow | null; events: EventRows; castles?: CastleRow[] };
         o += tailLength;
 
         const players: SnapPlayer[] = [];
@@ -318,7 +352,7 @@ export function decodeSnapshot (buffer: ArrayBuffer): SnapshotMessage | null
             neutrals[k * 5 + 4] = v.getUint8(o + 9);
             o += NEUTRAL_BYTES;
         }
-        return { t: 'snap', time, you: tail.you, players, neutrals, events: tail.events };
+        return { t: 'snap', time, you: tail.you, players, neutrals, events: tail.events, castles: tail.castles ?? [] };
     }
     catch
     {
@@ -339,7 +373,7 @@ function heading (n: number): number
 export function encodeBody (b: FallenBody, now: number): BodyRow
 {
     return [
-        b.id, round1(b.position.x), round1(b.position.y), b.colorId, b.facing, b.role === 'archer' ? 1 : 0,
+        b.id, round1(b.position.x), round1(b.position.y), b.colorId, b.facing, roleCode(b.role),
         Math.max(0, Math.round(b.readyAt - now)), Math.max(0, Math.round(b.expiresAt - now)), b.awake ? 1 : 0,
     ];
 }

@@ -1,4 +1,5 @@
 import type { BattlefieldLayout } from './BattlefieldLayout';
+import type { CastleStatus } from './Castles';
 import type { NeutralWarrior } from './Neutrals';
 import type { ObstacleMap } from './Obstacles';
 import type { Player } from './Player';
@@ -19,6 +20,8 @@ export interface GameWorld {
     readonly human: Player;
     readonly neutrals: { readonly units: readonly NeutralWarrior[] };
     readonly shards: { readonly shards: readonly SoulShard[] };
+    /** The capturable castles (owner, capture progress, Guardians...). */
+    readonly castles: readonly CastleStatus[];
     readonly matchStartedAt: number | null;
     readonly humanDefeated: boolean;
 

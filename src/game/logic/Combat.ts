@@ -26,6 +26,8 @@ export interface CombatSettings {
     regenPerSecond: number;
     /** Archers: less health, shoot from range. */
     archer: { maxHp: number; damage: number; range: number; attackIntervalMs: number };
+    /** Guardians: lots of health, light melee blows, a slow swing. */
+    guardian: { maxHp: number; damage: number; attackIntervalMs: number };
     /**
      * Soldiers in a split-off cluster hit according to that cluster's size:
      * [cluster size, share of normal damage] rows, blended in between and held
@@ -230,10 +232,12 @@ function strike (
 ): void
 {
     const ranged = attacker.role === 'archer';
-    const base = (ranged ? settings.archer.damage : settings.damage) * damageShare;
+    const guardian = attacker.role === 'guardian';
+    const base = (ranged ? settings.archer.damage : guardian ? settings.guardian.damage : settings.damage) * damageShare;
     const damage = Math.round(base * (1 + (rng() * 2 - 1) * settings.damageVariance));
     target.hp = Math.max(0, target.hp - damage);
-    attacker.nextAttackAt = now + (ranged ? settings.archer.attackIntervalMs : settings.attackIntervalMs) * (0.9 + rng() * 0.2);
+    const interval = ranged ? settings.archer.attackIntervalMs : guardian ? settings.guardian.attackIntervalMs : settings.attackIntervalMs;
+    attacker.nextAttackAt = now + interval * (0.9 + rng() * 0.2);
     attackerOwner.lastCombatAt = now;
     targetOwner.lastCombatAt = now;
     hits.push({ attacker, target, attackerOwner, targetOwner, damage, ranged });

@@ -29,7 +29,7 @@ import { allWarriors, armySpeedMultiplier, secondsUntilRegroup } from '../src/ga
 import type { Vec2 } from '../src/game/logic/Types';
 import { World, type PlayerCommand, type WorldEvents } from '../src/game/logic/World';
 import {
-    cleanDirection, emptyEvents, encodeBody, encodeSnapshot, JOIN_RECRUITED, JOIN_SUMMONED, PROTOCOL_VERSION, rosterRow, round1,
+    castleRow, cleanDirection, emptyEvents, encodeBody, encodeSnapshot, JOIN_RECRUITED, JOIN_SUMMONED, PROTOCOL_VERSION, rosterRow, round1,
     type ClientMessage, type EventRows, type ServerMessage, type SnapshotArmy, type YouRow,
 } from '../src/game/net/Protocol';
 import { ARMY_COLORS, type ArmyColor } from '../src/game/render/Palette';
@@ -183,6 +183,8 @@ function broadcastSnapshot (now: number): void
         const warriors = p.respawnAt === null ? allWarriors(p.army) : ([] as Warrior[]);
         return { net: netIdOf(p), player: p, warriors, size: warriors.length };
     });
+    // Castles: decided here only (the server is the one authority), sent to everyone.
+    const castles = world.castles.map((c) => castleRow(c, netIdOf));
     // Names, colours and kills go out only when they change (not 15 times a second).
     const roster = JSON.stringify({ t: 'roster', players: armies.map((a) => rosterRow(a.net, a.player)) });
 
@@ -214,7 +216,7 @@ function broadcastSnapshot (now: number): void
             regroup: secondsUntilRegroup(p.army, now, GameConfig.army),
             speed: round1(GameConfig.movement.maxSpeed * armySpeedMultiplier(p.army, GameConfig.army)),
         };
-        c.socket.send(encodeSnapshot(now, you, { ...events, hits }, sent, world.neutrals.units, now));
+        c.socket.send(encodeSnapshot(now, you, { ...events, hits }, sent, world.neutrals.units, now, castles));
     }
 }
 

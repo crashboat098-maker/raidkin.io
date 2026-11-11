@@ -60,6 +60,7 @@ const PAINTERS: Record<StructureType, Painter> = {
     darkSpire: paintDarkSpire,
     ashHouse: paintAshHouse,
     stiltHut: paintStiltHut,
+    swampCastle: paintSwampCastle,
 };
 
 // ---------------------------------------------------------------------------
@@ -275,6 +276,130 @@ function paintGothicFortress (p: PixelPainter, lights: StructureLight[]): void
     torch(p, lights, 133, 164);
     // Soot and cracks.
     for (let i = 0; i < 60; i++) p.set(20 + rng() * 184, 126 + rng() * 72, BLACK[4]);
+}
+
+/** Moss-grown swamp stone (light to dark), mossy slate, old wood, roots and the swamp's green light. */
+const MIRE_STONE = ['#7d8a6a', '#626e52', '#4a553e', '#343c2c', '#22281c'];
+const MIRE_ROOF = ['#5e7046', '#46563a', '#33402a', '#222c1c'];
+const MIRE_WOOD = ['#8a7050', '#6a5238', '#4c3a28', '#33271b'];
+const MIRE_ROOT = ['#5a4430', '#3e2e20', '#2a1f15'];
+const MIRE_GLOW = { light: '#d6ff9a', mid: '#b6ff5c', deep: '#5a8a2a' };
+const MOSS = ['#6f8a3a', '#4f6a32', '#3f5a2a'];
+
+/**
+ * 176 x 156: the swamp castle. Weathered, moss-covered stone: a crooked
+ * back tower and a keep under mossy slate, a curtain wall whose battlements
+ * have half crumbled, one front tower still roofed and one broken open.
+ * Twisted roots climb the walls, vines hang from them, a wooden walkway
+ * runs along the wall on rickety struts, and the windows glow sickly green.
+ */
+function paintSwampCastle (p: PixelPainter, lights: StructureLight[]): void
+{
+    const rng = p.rng;
+    const W = 176;
+    const H = 156;
+
+    // Back: a tall, slightly crooked tower and the keep.
+    roundTower(p, 48, 9, 34, 112, MIRE_STONE, MIRE_ROOF, 24);
+    p.line(48, 6, 51, 2, MIRE_ROOT[1]); // its finial bent askew
+    masonry(p, 64, 46, 50, 70, MIRE_STONE, 0.25);
+    for (let row = 0; row < 28; row++)
+    {
+        // Steep mossy gable over the keep, a few slates missing.
+        const w = Math.round((row / 28) * 28);
+        for (let x = -w; x <= w; x++)
+        {
+            if (rng() < 0.03) continue;
+            p.set(89 + x, 18 + row, MIRE_ROOF[(x < -w / 3 ? 0 : x > w / 3 ? 2 : 1) + (row % 4 === 3 ? 1 : 0)]);
+        }
+    }
+    for (const x of [74, 98]) archWindow(p, lights, x, 60, 6, 13, MIRE_GLOW.mid, MIRE_STONE[4], 0.32);
+    archWindow(p, lights, 86, 52, 6, 11, MIRE_GLOW.light, MIRE_STONE[4], 0.3);
+
+    // Front: the curtain wall, battlements crumbled in places.
+    masonry(p, 22, 96, 132, 60, MIRE_STONE, 0.25);
+    for (let x = 22; x < 154; x += 4)
+    {
+        if (rng() < 0.3) continue; // fallen merlons
+        p.rect(x, 92, 2, 4, MIRE_STONE[x % 8 === 2 ? 0 : 1]);
+    }
+    // The gate: a pointed arch with rotting plank doors, half open.
+    for (let dy = 0; dy < 38; dy++)
+    {
+        const inset = dy < 11 ? 11 - dy : 0;
+        for (let dx = inset; dx < 24 - inset; dx++)
+        {
+            const edge = dx === inset || dx === 23 - inset;
+            const plank = (dx % 4 === 0 ? MIRE_WOOD[3] : MIRE_WOOD[(dx + Math.floor(dy / 7)) % 2 === 0 ? 1 : 2]);
+            p.set(76 + dx, 118 + dy, edge ? MIRE_STONE[0] : dx > 13 && dy > 8 ? '#141a10' : plank);
+        }
+    }
+    p.rect(77, 134, 12, 1, MIRE_WOOD[0]); // iron-less cross-brace
+    lights.push({ x: 88, y: 146, color: MIRE_GLOW.deep, scale: 0.7, kind: 'rune' });
+    for (const x of [36, 54, 116, 134]) archWindow(p, lights, x, 106, 5, 10, MIRE_GLOW.mid, MIRE_STONE[4], 0.26);
+
+    // A wooden walkway along the wall, on crooked struts, with a rope railing.
+    for (const [from, to] of [[24, 72], [104, 152]])
+    {
+        p.rect(from, 122, to - from, 3, MIRE_WOOD[1]);
+        p.rect(from, 122, to - from, 1, MIRE_WOOD[0]);
+        for (let x = from; x < to; x += 3) p.set(x, 124, MIRE_WOOD[3]);
+        for (let x = from + 2; x < to; x += 9)
+        {
+            p.rect(x, 117, 1, 5, MIRE_WOOD[2]);                       // railing post
+            p.line(x, 125, x + (rng() < 0.5 ? -4 : 4), 133, MIRE_WOOD[2]); // strut
+        }
+        for (let x = from; x < to; x++) p.set(x, 118 + Math.round(Math.sin(x / 3) * 0.6), MIRE_ROOT[0]); // sagging rope
+    }
+
+    // Front towers: one still roofed, one broken open at the top.
+    roundTower(p, 18, 15, 62, H, MIRE_STONE, MIRE_ROOF, 26);
+    roundTower(p, W - 19, 15, 74, H, MIRE_STONE, MIRE_ROOF, 1);
+    for (let x = -15; x <= 15; x++)
+    {
+        // Jagged, broken rim (overpaints the stub of a roof).
+        const bite = Math.abs(Math.sin(x * 1.7)) * 9 + (rng() < 0.3 ? 3 : 0);
+        for (let y = 68; y < 74 + bite; y++) p.clear(W - 19 + x, y);
+        p.set(W - 19 + x, Math.round(74 + bite), MIRE_STONE[0]);
+    }
+    for (const cx of [18, W - 19])
+    {
+        archWindow(p, lights, cx - 3, 100, 6, 12, MIRE_GLOW.mid, MIRE_STONE[4], 0.3);
+        archWindow(p, lights, cx - 2, 128, 5, 9, MIRE_GLOW.light, MIRE_STONE[4], 0.24);
+    }
+
+    // Twisted roots climbing out of the bog, up the towers and walls.
+    for (const start of [6, 26, 44, 66, 110, 128, 150, 168])
+    {
+        let x = start;
+        const height = 18 + rng() * 34;
+        for (let y = H - 1; y > H - height; y--)
+        {
+            x += Math.round((rng() - 0.5) * 2);
+            p.set(x, y, MIRE_ROOT[1]);
+            if (y > H - 12) { p.set(x + 1, y, MIRE_ROOT[2]); p.set(x - 1, y, MIRE_ROOT[0]); }
+            if (rng() < 0.08) p.line(x, y, x + (rng() < 0.5 ? -3 : 3), y - 3, MIRE_ROOT[0]);
+        }
+    }
+    // Moss: thick at the foot of every wall, patchy higher up; vines hanging from the parapets.
+    p.speckle(0, H - 26, W, 26, MOSS[1], 0.3);
+    p.speckle(0, 60, W, 70, MOSS[0], 0.08);
+    p.speckle(60, 40, 56, 40, MOSS[2], 0.1);
+    for (let i = 0; i < 26; i++)
+    {
+        const x = 22 + Math.floor(rng() * 132);
+        const length = 4 + Math.floor(rng() * 14);
+        if (x > 74 && x < 102) continue; // keep the gate clear
+        for (let y = 96; y < 96 + length; y++) if (p.has(x, y)) p.set(x, y, y % 3 === 0 ? MOSS[0] : MOSS[2]);
+    }
+    // Swamp lanterns either side of the gate.
+    for (const x of [70, 106])
+    {
+        p.rect(x, 128, 1, 6, MIRE_WOOD[3]);
+        p.rect(x - 1, 125, 3, 3, MIRE_GLOW.mid);
+        p.set(x, 126, MIRE_GLOW.light);
+        lights.push({ x, y: 126, color: MIRE_GLOW.mid, scale: 0.5, kind: 'window' });
+    }
 }
 
 /**

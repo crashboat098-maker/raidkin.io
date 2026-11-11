@@ -16,11 +16,11 @@ export type StructureType = 'barracks' | 'watchtower' | 'fortification' | 'keep'
     // Volcanic wastes
     | 'gothicFortress' | 'cathedral' | 'darkSpire' | 'ashHouse'
     // Swamp
-    | 'stiltHut';
+    | 'stiltHut' | 'swampCastle';
 
 /** Structure types that only appear in a corner biome (placed by the biome generator). */
 export const BIOME_STRUCTURES: readonly StructureType[] = [
-    'volcano', 'faeHouse', 'shrine', 'moonGate', 'faeCastle', 'gothicFortress', 'cathedral', 'darkSpire', 'ashHouse', 'stiltHut',
+    'volcano', 'faeHouse', 'shrine', 'moonGate', 'faeCastle', 'gothicFortress', 'cathedral', 'darkSpire', 'ashHouse', 'stiltHut', 'swampCastle',
 ];
 
 export interface Structure {
@@ -85,6 +85,8 @@ export const STRUCTURE_SPECS: Record<StructureType, StructureSpec> = {
     ashHouse:      { width: 32, depth: 16, height: 40, clearance: 0, count: 0 },
     // Swamp villages: reed-thatched huts raised on wooden stilts.
     stiltHut:      { width: 34, depth: 16, height: 46, clearance: 0, count: 0 },
+    // The swamp's capturable castle: mossy stone, twisted roots and wooden walkways.
+    swampCastle:   { width: 176, depth: 56, height: 156, clearance: 0, count: 0 },
 };
 
 /** The solid ground rectangles of a structure, for collision. */

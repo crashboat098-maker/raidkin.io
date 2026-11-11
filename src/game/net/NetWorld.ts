@@ -1,5 +1,6 @@
 import type { GameConfig as GameConfigType } from '../config/GameConfig';
-import { createWarrior, type Warrior } from '../logic/Army';
+import { createWarrior, type SoldierRole, type Warrior } from '../logic/Army';
+import type { CastleStatus } from '../logic/Castles';
 import { generateBattlefield, type BattlefieldLayout } from '../logic/BattlefieldLayout';
 import type { Death, Hit } from '../logic/Combat';
 import type { FallenBody } from '../logic/Fallen';
@@ -15,7 +16,7 @@ import type { Rect, Vec2 } from '../logic/Types';
 import { movementBounds, type WorldEvents } from '../logic/World';
 import type { NetClient } from './NetClient';
 import {
-    JOIN_RECRUITED, NEUTRAL_AVAILABLE, NEUTRAL_FACING_LEFT, NEUTRAL_KINDS, NEUTRAL_MOVING, NEUTRAL_READY, PROTOCOL_VERSION,
+    CASTLE_STATES, JOIN_RECRUITED, NEUTRAL_AVAILABLE, roleFromCode, WARRIOR_GUARDIAN, NEUTRAL_FACING_LEFT, NEUTRAL_KINDS, NEUTRAL_MOVING, NEUTRAL_READY, PROTOCOL_VERSION,
     WARRIOR_ARCHER, WARRIOR_BURNING, WARRIOR_FACING_LEFT, WARRIOR_MOVING,
     type BodyRow, type DefeatMessage, type RosterRow, type ServerMessage, type SnapPlayer, type SnapshotMessage, type StateMessage, type YouRow,
 } from './Protocol';
@@ -69,6 +70,8 @@ export class NetWorld implements GameWorld
     human: Player;
     readonly neutrals: { units: NeutralWarrior[] };
     readonly shards: { shards: SoulShard[] };
+    /** The castles, as the server last reported them. */
+    readonly castles: CastleStatus[];
     matchStartedAt: number | null = null;
     humanDefeated = false;
     /** The connection dropped mid-match. */
@@ -113,6 +116,9 @@ export class NetWorld implements GameWorld
         const forces = new NeutralForces(this.layout, this.obstacles, config.neutrals, config.world.seed + 2, createIdSource());
         this.neutrals = { units: forces.units };
         for (const u of forces.units) this.neutralsBySite.set(u.siteId, u);
+        this.castles = this.layout.castles.map((site) => ({
+            site, state: 'neutral', owner: null, capturer: null, progress: 0, contested: false, awarded: 0, nextGuardianMs: null, cooldownMs: 0,
+        }));
         this.human = this.makePlayer('you', name, color, 'human', this.layout.spawn);
 
         net.listen((m) => this.receive(m), () => { this.disconnected = true; });
@@ -143,6 +149,12 @@ export class NetWorld implements GameWorld
         }
         this.interpolate(renderTime);
         this.predictOwnArmy(input, dt);
+        // Castle countdowns tick on between snapshots.
+        for (const c of this.castles)
+        {
+            if (c.nextGuardianMs !== null) c.nextGuardianMs = Math.max(0, c.nextGuardianMs - dt * 1000);
+            c.cooldownMs = Math.max(0, c.cooldownMs - dt * 1000);
+        }
         return events;
     }
 
@@ -410,9 +422,10 @@ export class NetWorld implements GameWorld
                 let t = this.warriors.get(id);
                 if (!t)
                 {
-                    const archer = (flags & WARRIOR_ARCHER) !== 0;
-                    const maxHp = archer ? this.config.combat.archer.maxHp : this.config.combat.maxHp;
-                    const warrior = createWarrior(id, { x: list[i + 1], y: list[i + 2] }, maxHp, archer ? 'archer' : 'warrior');
+                    const role: SoldierRole = flags & WARRIOR_ARCHER ? 'archer' : flags & WARRIOR_GUARDIAN ? 'guardian' : 'warrior';
+                    const combat = this.config.combat;
+                    const maxHp = role === 'archer' ? combat.archer.maxHp : role === 'guardian' ? combat.guardian.maxHp : combat.maxHp;
+                    const warrior = createWarrior(id, { x: list[i + 1], y: list[i + 2] }, maxHp, role);
                     t = { warrior, owner, from: { x: list[i + 1], y: list[i + 2] } };
                     this.warriors.set(id, t);
                     const how = joinedHow.get(id);
@@ -527,6 +540,27 @@ export class NetWorld implements GameWorld
             events.shardsRespawned.push(shard);
         }
 
+        // Castles (decided by the server).
+        for (const row of m.castles)
+        {
+            const c = this.castles[row[0]];
+            if (!c) continue;
+            const playerOf = (net: number) => {
+                const info = net >= 0 ? this.roster.get(net) : undefined;
+                return info ? this.playersById.get(info[1]) ?? null : null;
+            };
+            const before = c.state;
+            c.state = CASTLE_STATES[row[1]] ?? 'neutral';
+            c.owner = playerOf(row[2]);
+            c.capturer = playerOf(row[3]);
+            c.progress = row[4] / 1000;
+            c.contested = row[5] === 1;
+            c.awarded = row[6];
+            c.nextGuardianMs = row[7] < 0 ? null : row[7];
+            c.cooldownMs = row[8];
+            if (before === 'neutral' && c.state === 'owned' && !firstApply) (events.castlesCaptured ??= []).push(c);
+        }
+
         // Fallen bodies.
         for (const row of e.bodiesFallen) events.bodiesFallen.push(this.addBody(row, now));
         for (const id of e.bodiesAwakened)
@@ -579,10 +613,10 @@ export class NetWorld implements GameWorld
 
     private addBody (row: BodyRow, now: number): FallenBody
     {
-        const [id, x, y, colorId, facing, archer, readyIn, expiresIn, awake] = row;
+        const [id, x, y, colorId, facing, role, readyIn, expiresIn, awake] = row;
         const body: FallenBody = {
             id, position: { x, y }, colorId, facing: facing < 0 ? -1 : 1,
-            fallenAt: now, readyAt: now + readyIn, expiresAt: now + expiresIn, awake: awake === 1, role: archer ? 'archer' : 'warrior',
+            fallenAt: now, readyAt: now + readyIn, expiresAt: now + expiresIn, awake: awake === 1, role: roleFromCode(role),
         };
         this.bodies.set(id, body);
         return body;

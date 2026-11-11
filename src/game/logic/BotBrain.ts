@@ -1,4 +1,5 @@
 import { centroid, distance, findDetour } from './Army';
+import type { CastleStatus } from './Castles';
 import { averageHealth, strength } from './Combat';
 import type { FallenBody } from './Fallen';
 import type { NeutralWarrior } from './Neutrals';
@@ -21,6 +22,7 @@ import type { Rect, Vec2 } from './Types';
  *   FLEE     a much stronger army is close (or we're hurt and it's not weaker)
  *   HUNT     a clearly weaker army is in reach (big bots also search further)
  *   FIGHT    a similar-sized army is close and we're healthy
+ *   CAPTURE  take a free castle nearby, or hold the one we own (Guardians)
  *   RECRUIT  a neutral Warrior is near (small armies weigh this highest)
  *   GATHER   a Soul Shard is near (staying away from threats)
  *   RECOVER  hurt: keep away from everyone and gather until healed
@@ -30,7 +32,7 @@ import type { Rect, Vec2 } from './Types';
  * for a while, so a bot never chases an unreachable opponent forever.
  */
 
-export type BotMode = 'explore' | 'gather' | 'recruit' | 'hunt' | 'fight' | 'flee' | 'recover';
+export type BotMode = 'explore' | 'gather' | 'recruit' | 'capture' | 'hunt' | 'fight' | 'flee' | 'recover';
 
 interface Pursuit {
     playerId: string;
@@ -73,6 +75,10 @@ export interface BotSettings {
     huntSearchRadius: number;
     pursuitGiveUpMs: number;
     pursuitIgnoreMs: number;
+    /** Armies this big go for castles... */
+    castleMinSize?: number;
+    /** ...within this distance (world px). */
+    castleSearchRadius?: number;
 }
 
 /** What a bot can see of the world. */
@@ -82,6 +88,8 @@ export interface BotView {
     neutrals: readonly NeutralWarrior[];
     /** Fallen soldiers that can be revived right now. */
     bodies?: readonly FallenBody[];
+    /** The capturable castles. */
+    castles?: readonly CastleStatus[];
     obstacles: ObstacleMap;
     bounds: Rect;
     rng: Rng;
@@ -283,6 +291,20 @@ function decide (bot: Player, view: BotView, now: number, s: BotSettings): void
     const danger = visible.filter((r) => r.strength >= myStrength * s.engageRatio);
     const safe = (p: Vec2) => danger.every((d) => distance(p, d.centre) > 140);
 
+    // CAPTURE: hold a castle we own while it still grants Guardians, or go take a
+    // free one (also to stop someone else taking it). Inside the circle, keep
+    // milling about in it rather than walking out.
+    const castle = !injured ? castleGoal(bot, view.castles ?? [], me, mine.length, s) : null;
+    if (castle)
+    {
+        state.mode = 'capture';
+        const { site } = castle;
+        const spread = site.radius * 0.45;
+        const spot = { x: site.x + randRange(view.rng, -spread, spread), y: site.y + randRange(view.rng, -spread * 0.6, spread * 0.8) };
+        setTarget(state, spot, now, me);
+        return;
+    }
+
     // RECRUIT / GATHER. Small armies value recruits most; big armies value both.
     // Recruits: neutral Warriors and the bodies of the fallen (both join for free).
     // A full army leaves them for everyone else and just roams.
@@ -319,6 +341,27 @@ function decide (bot: Player, view: BotView, now: number, s: BotSettings): void
     }
     setTarget(state, wander, now, me);
     state.mode = 'explore';
+}
+
+/**
+ * The castle worth going to: one we own that is still granting Guardians
+ * (always, if it's in reach), else the nearest free one in reach (neutral,
+ * not resting), if the army is big enough to take and hold it.
+ */
+function castleGoal (bot: Player, castles: readonly CastleStatus[], me: Vec2, size: number, s: BotSettings): CastleStatus | null
+{
+    const reach = s.castleSearchRadius ?? 0;
+    const near = (c: CastleStatus) => distance(me, c.site) <= reach;
+    const owned = castles.find((c) => c.state === 'owned' && c.owner === bot && near(c));
+    if (owned) return owned;
+    if (size < (s.castleMinSize ?? Infinity)) return null;
+    let best: CastleStatus | null = null;
+    for (const c of castles)
+    {
+        if (c.state !== 'neutral' || !near(c)) continue;
+        if (!best || distance(me, c.site) < distance(me, best.site)) best = c;
+    }
+    return best;
 }
 
 /**

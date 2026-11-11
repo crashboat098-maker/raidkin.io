@@ -19,8 +19,8 @@ import type { Rect, Vec2 } from './Types';
  * 30 separate pathfinders.
  */
 
-/** Melee Warriors, or Archers who shoot from behind them. */
-export type SoldierRole = 'warrior' | 'archer';
+/** Melee Warriors, Archers who shoot from behind them, and heavily armoured Guardians up front. */
+export type SoldierRole = 'warrior' | 'archer' | 'guardian';
 
 export interface Warrior {
     /** Unique id (never reused). */
@@ -86,6 +86,11 @@ export interface ClusterSettings {
     trailSpacing: number;
     trailLength: number;
     recovery: { enabled: boolean; afterMs: number; minDistance: number };
+    /**
+     * Guardians walk at this share of `warriorSpeed`. Kept at or above the
+     * army's own top speed, so Guardians never hold the army back.
+     */
+    guardianSpeedMultiplier?: number;
 }
 
 /** A Warrior's solid footprint. */
@@ -218,6 +223,30 @@ export function rearSlot (slot: Vec2, heading: Vec2): Vec2
     return { x: slot.x - heading.x * back, y: slot.y - heading.y * back };
 }
 
+/** How far ahead of the cluster's centre line Guardians stand (world px). */
+const GUARDIAN_FRONT = 8;
+
+/**
+ * A Guardian's spot: its formation slot, moved forward along the cluster's
+ * heading so it is at least GUARDIAN_FRONT px ahead of the centre. Guardians
+ * end up in the front half, shields between the enemy and everyone else.
+ */
+export function frontSlot (slot: Vec2, heading: Vec2): Vec2
+{
+    const ahead = slot.x * heading.x + slot.y * heading.y;
+    if (ahead >= GUARDIAN_FRONT) return slot;
+    const forward = GUARDIAN_FRONT - ahead;
+    return { x: slot.x + heading.x * forward, y: slot.y + heading.y * forward };
+}
+
+/** Where a soldier of this role stands: Archers at the back, Guardians up front. */
+function roleSlot (role: SoldierRole, slot: Vec2, heading: Vec2): Vec2
+{
+    if (role === 'archer') return rearSlot(slot, heading);
+    if (role === 'guardian') return frontSlot(slot, heading);
+    return slot;
+}
+
 /** Roughly how far a cluster of `count` soldiers reaches from its centre. */
 export function clusterRadius (count: number, spacing: number): number
 {
@@ -294,9 +323,9 @@ export function updateCluster (
 
     for (const warrior of cluster.warriors)
     {
-        // 1. Where should I be? (Archers keep to the rear, behind the melee Warriors.)
+        // 1. Where should I be? (Archers keep to the rear, Guardians to the front.)
         const slot = slots[warrior.slot] ?? { x: 0, y: 0 };
-        const target = formationTarget(centre, warrior.role === 'archer' ? rearSlot(slot, cluster.heading) : slot, obstacles, bounds);
+        const target = formationTarget(centre, roleSlot(warrior.role, slot, cluster.heading), obstacles, bounds);
 
         // 2. How do I get there? (re-planned a few times a second, staggered)
         if (now >= warrior.nextThinkAt)
@@ -340,7 +369,8 @@ export function updateCluster (
         const farBehind = distance(warrior.position, target) > 48;
         // Shallow water slows soldiers down too.
         const terrain = obstacles.speedFactorAt(warrior.position.x, warrior.position.y);
-        const topSpeed = settings.warriorSpeed * (farBehind ? settings.catchUpMultiplier : 1) * terrain;
+        const roleSpeed = warrior.role === 'guardian' ? settings.guardianSpeedMultiplier ?? 1 : 1;
+        const topSpeed = settings.warriorSpeed * roleSpeed * (farBehind ? settings.catchUpMultiplier : 1) * terrain;
 
         let speed = topSpeed;
         // Slow down near the slot and stop when close enough (prevents fidgeting).

@@ -11,6 +11,7 @@ import { decorateSwamp, planSwamp } from './Swamp';
 import { applyDeckRects, generateLavaRivers, isLava, isLavaSurface, planLavaBridges, riverSkew, type LavaLayout } from './LavaRivers';
 import { applyBridges, findBridges, type Bridge } from './Bridges';
 import { lavaPoolCollider, planVolcano, volcanoInfluence, volcanoZone, type VolcanoLayout } from './Volcano';
+import { castleSite, type CastleSite } from './Castles';
 
 /**
  * Builds the battlefield as plain data: ground tiles, trails, structures,
@@ -214,6 +215,8 @@ export interface BattlefieldLayout {
     villages: Village[];
     /** Gameplay landmarks (barracks, towers, keeps...). */
     structures: Structure[];
+    /** The three capturable castles and their capture circles (none on the original-size map). */
+    castles: CastleSite[];
     /** Visual terrain objects (some are solid, see DECORATION_COLLIDERS). */
     decorations: Decoration[];
     /** Every solid rectangle on the map (structures + solid decorations). */
@@ -425,6 +428,7 @@ function generateCore (settings: LayoutSettings, openEdges: boolean): Battlefiel
         lavaBridges: [],
         villages,
         structures,
+        castles: [],
         decorations,
         obstacles,
         itemSpawnTiles,
@@ -532,7 +536,17 @@ function expandBattlefield (core: BattlefieldLayout, settings: LayoutSettings, e
     }
 
     const villages = [...core.villages, forest.village, ...wastes.villages, ...swamp.villages];
-    const structures = [...core.structures, ...forestStructures, ...wastes.landmarks, ...wastes.villages.flatMap((v) => v.houses), ...swamp.villages.flatMap((v) => v.houses)];
+    const structures = [
+        ...core.structures, ...forestStructures, ...wastes.landmarks, ...wastes.villages.flatMap((v) => v.houses), ...swamp.villages.flatMap((v) => v.houses),
+        ...(swamp.castle ? [swamp.castle] : []),
+    ];
+    // The three capturable castles: the fae castle, the gothic fortress, the swamp castle.
+    const fortress = wastes.landmarks.find((s) => s.type === 'gothicFortress');
+    const castles: CastleSite[] = [];
+    for (const [structure, biome] of [[forest.castle, 'enchanted'], [fortress, 'volcanic'], [swamp.castle, 'swamp']] as const)
+    {
+        if (structure) castles.push(castleSite(castles.length, structure, biome));
+    }
 
     // 5c. Lava rivers flowing from the volcano's foot out through the wastes,
     //     around every building, village, lava pool and stretch of water.
@@ -768,8 +782,11 @@ function expandBattlefield (core: BattlefieldLayout, settings: LayoutSettings, e
         clearings: [forest.grounds, ...forest.landmarks.map((s) => ({ center: { x: s.x, y: s.y - 10 }, radius: 50 }))],
     });
     const wastesDecor = decorateWastes(createRng(seed ^ 0xa5ed), { biomes, region: regionOf(biomes, 'volcanic')!, playArea, solids, isFree });
+    // The swamp castle's grounds stay open (its capture circle is a battleground).
+    const swampGrounds = swamp.castleGrounds;
+    const swampFree = swampGrounds ? (p: Vec2) => isFree(p) && !rectContains(swampGrounds, p) : isFree;
     const swampDecor = decorateSwamp(createRng(seed ^ 0x5ade), {
-        biomes, region: swampRegion, playArea, water, solids, isFree,
+        biomes, region: swampRegion, playArea, water, solids, isFree: swampFree,
         atShore: (p) => !wet(p) && nearWater(p) && !onTrail(p) && !inVillage(p) && !structureAreas.some((a) => rectContains(a, p)),
     });
 
@@ -823,6 +840,7 @@ function expandBattlefield (core: BattlefieldLayout, settings: LayoutSettings, e
         lavaBridges,
         villages,
         structures,
+        castles,
         decorations,
         obstacles,
         itemSpawnTiles,

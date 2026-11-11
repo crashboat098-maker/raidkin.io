@@ -21,7 +21,16 @@ export interface SwampPlan {
     pools: WaterBody[];
     /** Wooden walkways across pools (laid as trails; their decks become bridges). */
     boardwalks: Vec2[][];
+    /** The swamp's capturable castle (null if there was no dry room for it). */
+    castle: Structure | null;
+    /** Ground kept dry and open around the castle (its capture circle). */
+    castleGrounds: Rect | null;
 }
+
+/** Dry, open ground the swamp castle needs: the castle, plus its capture circle in front. */
+const CASTLE_HALF_WIDTH = 160;
+const CASTLE_ABOVE = 166;
+const CASTLE_BELOW = 200;
 
 interface SwampContext {
     region: BiomeRegion;
@@ -80,6 +89,32 @@ export function planSwamp (rng: Rng, ctx: SwampContext): SwampPlan
             villages.push(village);
             break;
         }
+    }
+
+    // 1b. The swamp castle, on a broad stretch of dry ground away from the villages.
+    let castle: Structure | null = null;
+    let castleGrounds: Rect | null = null;
+    const dryEverywhere = (r: Rect) => {
+        for (let fy = 0; fy <= 1.0001; fy += 0.125)
+        {
+            for (let fx = 0; fx <= 1.0001; fx += 0.125) if (ctx.isWet({ x: r.x + r.width * fx, y: r.y + r.height * fy })) return false;
+        }
+        return true;
+    };
+    for (const minInfluence of [0.8, 0.6])
+    {
+        for (let attempt = 0; attempt < 1500 && !castle; attempt++)
+        {
+            const c = randomInRegion();
+            const box = { x: c.x - CASTLE_HALF_WIDTH, y: c.y - CASTLE_ABOVE, width: CASTLE_HALF_WIDTH * 2, height: CASTLE_ABOVE + CASTLE_BELOW };
+            if (!inside(box.x, box.y, 0) || !inside(box.x + box.width, box.y + box.height, 0)) continue;
+            if (influence(c.x, c.y) < minInfluence || influence(c.x, c.y + CASTLE_BELOW) < minInfluence * 0.8) continue;
+            if (overlaps({ x: box.x - 40, y: box.y - 40, width: box.width + 80, height: box.height + 80 }) || !dryEverywhere(box)) continue;
+            taken.push(box);
+            castleGrounds = box;
+            castle = { id: nextId++, type: 'swampCastle', x: c.x, y: c.y };
+        }
+        if (castle) break;
     }
 
     // 2. Murky pools, spaced so wide dry lanes run between them.
@@ -145,7 +180,7 @@ export function planSwamp (rng: Rng, ctx: SwampContext): SwampPlan
         }
     }
 
-    return { villages, pools, boardwalks };
+    return { villages, pools, boardwalks, castle, castleGrounds };
 }
 
 /** A gently meandering line from a to b. */

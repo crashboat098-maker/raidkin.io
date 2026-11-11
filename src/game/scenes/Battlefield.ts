@@ -11,6 +11,7 @@ import { netClient } from '../net/NetClient';
 import { NetWorld } from '../net/NetWorld';
 import { addVignette, buildBattlefieldView, fitVignette } from '../render/BattlefieldView';
 import { ZoomController } from '../render/CameraZoom';
+import { CastleView } from '../render/CastleView';
 import { CombatEffects } from '../render/CombatEffects';
 import { leaderId, rankPlayers } from '../logic/Leaderboard';
 import { FallenView } from '../render/FallenView';
@@ -56,6 +57,7 @@ export class Battlefield extends Scene
     private seeThrough: SeeThroughGroup;
     private culler: ViewCuller;
     private shardView: SoulShardView;
+    private castleView: CastleView;
     private controls: KeyboardControls;
     /** What the camera is following (the human army's steering point). */
     private cameraTarget: Vec2 | null = null;
@@ -107,6 +109,8 @@ export class Battlefield extends Scene
         buildStructureView(this, layout.structures, this.seeThrough);
         // Only the scenery near the camera is drawn (a huge saving on phones).
         this.culler = new ViewCuller(this, this.children.list.slice(sceneryFrom), layout.worldWidth, layout.worldHeight);
+        // Castle circles, banners and panels (made after the culler: they're never culled).
+        this.castleView = new CastleView(this, this.world.castles, GameConfig.castles);
         this.shardView = new SoulShardView(this, this.world.shards.shards);
         this.fallenView = new FallenView(this);
         this.neutralView = new NeutralView(this, this.world.neutrals.units);
@@ -241,6 +245,7 @@ export class Battlefield extends Scene
             this.fallenView.remove(body);
             this.addSoldier(warrior, owner, Palette.accent.purple);
         }
+        for (const castle of events.castlesCaptured ?? []) this.castleView.captured(castle, (x, y, color) => playJoinEffect(this, x, y, color));
         for (const { player, warriors } of events.respawned)
         {
             for (const w of warriors) this.addSoldier(w, player, Palette.accent.amber);
@@ -267,6 +272,7 @@ export class Battlefield extends Scene
         this.armyLabels.sync(world.players);
         this.crown.sync(world.players, leaderId(rankPlayers(world.players)), time);
         this.fallenView.sync(time, camera.worldView);
+        this.castleView.sync(world.castles, time, camera.worldView);
         this.culler.update(camera.worldView);
         // Structures/trees turn see-through only for YOUR soldiers (enemies behind cover stay hidden).
         this.seeThrough.update(human.respawnAt === null ? allWarriors(human.army).map((w) => w.position) : []);
@@ -286,10 +292,11 @@ export class Battlefield extends Scene
         }
     }
 
-    /** Show a soldier in its army's colour: a Warrior, or an Archer (with its bow-draw frame). */
+    /** Show a soldier in its army's colour: a Warrior, a Guardian, or an Archer (with its bow-draw frame). */
     private addSoldier (warrior: Warrior, owner: Player, effectColor: string | null): void
     {
         if (warrior.role === 'archer') this.armyView.add(warrior, Tex.archer(owner.colorId), effectColor, Tex.archerDraw(owner.colorId));
+        else if (warrior.role === 'guardian') this.armyView.add(warrior, Tex.guardian(owner.colorId), effectColor);
         else this.armyView.add(warrior, Tex.warrior(owner.colorId), effectColor);
     }
 
