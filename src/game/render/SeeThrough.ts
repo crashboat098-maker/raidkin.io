@@ -32,11 +32,22 @@ export class SeeThroughGroup
     /** Fade whatever stands in front of any of `points` (your soldiers' feet). Call every frame. */
     update (points: readonly Vec2[]): void
     {
+        // The box around all the points: scenery outside it can't have anyone behind it,
+        // so big armies only check the few occluders they're actually near.
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (const p of points)
+        {
+            if (p.x < minX) minX = p.x;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.y > maxY) maxY = p.y;
+        }
         for (const o of this.occluders)
         {
             // Off-screen (culled) scenery doesn't need checking.
             if (!o.sprite.visible) continue;
-            const isBehind = points.some((p) => p.y < o.baseY && p.y > o.top && Math.abs(p.x - o.x) < o.halfWidth);
+            const near = maxY > o.top && minY < o.baseY && maxX > o.x - o.halfWidth && minX < o.x + o.halfWidth;
+            const isBehind = near && points.some((p) => p.y < o.baseY && p.y > o.top && Math.abs(p.x - o.x) < o.halfWidth);
             const target = isBehind ? SEE_THROUGH_ALPHA : 1;
             const alpha = o.sprite.alpha;
             if (alpha === target) continue;

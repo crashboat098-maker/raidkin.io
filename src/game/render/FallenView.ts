@@ -1,5 +1,6 @@
 import { BlendModes, GameObjects, Scene } from 'phaser';
 import type { FallenBody } from '../logic/Fallen';
+import { GROUND_GLOW_DEPTH } from './Glow';
 import { hexToInt, Palette } from './Palette';
 import { Tex } from './PlaceholderArt';
 
@@ -51,7 +52,7 @@ export class FallenView
             .setBlendMode(BlendModes.ADD)
             .setScale(0.42, 0.28)
             .setAlpha(0)
-            .setDepth(Math.round(y) - 5);
+            .setDepth(GROUND_GLOW_DEPTH); // on the ground, with the other ground glows (see Glow.ts)
         this.sprites.set(data.id, { data, body, glow, wisp: null });
     }
 

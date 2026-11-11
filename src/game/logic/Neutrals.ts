@@ -66,6 +66,10 @@ const GARRISON_POSTS: Vec2[] = [{ x: -15, y: 16 }, { x: 15, y: 16 }, { x: 0, y: 
 const VILLAGE_ROAM = 10;
 /** How much faster than a stroll a surrendered soldier walks out to where it was sent. */
 const SURRENDER_WALK_SPEEDUP = 3;
+/** Grid key: row * GRID_ROW + column (any map is far narrower than this many cells). */
+const GRID_ROW = 100_003;
+/** Shared "nothing found" result (never modified). */
+const NONE: NeutralWarrior[] = [];
 
 export class NeutralForces
 {
@@ -73,6 +77,11 @@ export class NeutralForces
     private readonly rng: Rng;
     private readonly bounds: Rect;
     private nextSiteId = 0;
+    /** Available neutrals by grid cell, for recruitNear (null = rebuild on next use). */
+    private recruitGrid: Map<number, NeutralWarrior[]> | null = null;
+    private recruitCell = 32;
+    /** Each neutral's place in `units` when the grid was built (keeps tie order). */
+    private readonly recruitOrder = new Map<NeutralWarrior, number>();
 
     constructor (
         layout: BattlefieldLayout,
@@ -148,13 +157,10 @@ export class NeutralForces
         unit.nextWanderAt = recruitableAt;
         if (hasClearPath(obstacles, from, destination)) unit.wanderTarget = { x: destination.x, y: destination.y };
         this.units.push(unit);
+        this.recruitGrid = null;
         return unit;
     }
 
-    /**
-     * Recruit available neutrals within range of `position`, closest first,
-     * up to `maxCount`. Those that don't fit stay where they are.
-     */
     /** True if some neutral that can be recruited now is within recruiting range of `box`. */
     anyRecruitableNear (box: { minX: number; minY: number; maxX: number; maxY: number }, now: number): boolean
     {
@@ -163,13 +169,43 @@ export class NeutralForces
             && u.position.x >= box.minX - r && u.position.x <= box.maxX + r && u.position.y >= box.minY - r && u.position.y <= box.maxY + r);
     }
 
+    /**
+     * Recruit available neutrals within range of `position`, closest first,
+     * up to `maxCount`. Those that don't fit stay where they are.
+     *
+     * Called for every soldier every frame, so it only looks at the neutrals in
+     * the grid cells around `position` (same result as checking them all).
+     */
     recruitNear (position: Vec2, maxCount: number, now: number): NeutralWarrior[]
     {
-        if (maxCount <= 0) return [];
+        if (maxCount <= 0) return NONE;
 
-        const inRange = this.units
-            .filter((u) => u.available && now >= u.recruitableAt && distance(u.position, position) <= this.settings.recruitRange)
-            .sort((a, b) => distance(a.position, position) - distance(b.position, position))
+        const range = this.settings.recruitRange;
+        const grid = this.recruitGrid ?? this.buildRecruitGrid();
+        const c0 = Math.floor((position.x - range) / this.recruitCell);
+        const c1 = Math.floor((position.x + range) / this.recruitCell);
+        const r0 = Math.floor((position.y - range) / this.recruitCell);
+        const r1 = Math.floor((position.y + range) / this.recruitCell);
+        let found: NeutralWarrior[] | null = null;
+        for (let r = r0; r <= r1; r++)
+        {
+            for (let c = c0; c <= c1; c++)
+            {
+                const bucket = grid.get(r * GRID_ROW + c);
+                if (!bucket) continue;
+                for (const u of bucket)
+                {
+                    if (!u.available || now < u.recruitableAt || distance(u.position, position) > range) continue;
+                    (found ??= []).push(u);
+                }
+            }
+        }
+        if (!found) return NONE;
+
+        // Closest first; equally close ones in their original order.
+        const order = this.recruitOrder;
+        const inRange = found
+            .sort((a, b) => (distance(a.position, position) - distance(b.position, position)) || ((order.get(a) ?? 0) - (order.get(b) ?? 0)))
             .slice(0, maxCount);
 
         const { min, max } = this.settings.respawnDelayMs;
@@ -189,12 +225,35 @@ export class NeutralForces
     }
 
     /**
+     * Where the available neutrals are, by grid cell. Neutrals only move or
+     * come back in `update` and `addSurrendered`, which throw this away; a
+     * recruited one just turns unavailable and is skipped.
+     */
+    private buildRecruitGrid (): Map<number, NeutralWarrior[]>
+    {
+        const grid = new Map<number, NeutralWarrior[]>();
+        this.recruitOrder.clear();
+        this.recruitCell = Math.max(32, this.settings.recruitRange);
+        this.units.forEach((u, i) => {
+            if (!u.available) return;
+            this.recruitOrder.set(u, i);
+            const key = Math.floor(u.position.y / this.recruitCell) * GRID_ROW + Math.floor(u.position.x / this.recruitCell);
+            const bucket = grid.get(key);
+            if (bucket) bucket.push(u);
+            else grid.set(key, [u]);
+        });
+        this.recruitGrid = grid;
+        return grid;
+    }
+
+    /**
      * Wander around and refill empty sites. A site only refills once its
      * cooldown is over AND no player is nearby.
      * Returns the neutrals that reappeared this frame.
      */
     update (now: number, dt: number, obstacles: ObstacleMap, players: readonly Vec2[]): NeutralWarrior[]
     {
+        this.recruitGrid = null;
         const respawned: NeutralWarrior[] = [];
 
         for (const unit of this.units)
