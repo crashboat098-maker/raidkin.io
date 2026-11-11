@@ -121,6 +121,15 @@ export class CastleView
             filled = Math.floor(c.progress * dots);
             area = fill;
         }
+        else if (c.state === 'owned' && c.owner && c.capturer)
+        {
+            // Being taken over: the challenger's colour eats into the owner's ring.
+            base = hexToInt(colorsOf(c.owner).main);
+            baseAlpha = 0.5;
+            fill = hexToInt(colorsOf(c.capturer).main);
+            filled = Math.floor(c.progress * dots);
+            area = fill;
+        }
         else if (c.state === 'owned' && c.owner)
         {
             base = fill = hexToInt(colorsOf(c.owner).main);
@@ -198,6 +207,14 @@ export class CastleView
             detail = c.capturer
                 ? `${secs((1 - c.progress) * set.captureMs)}S LEFT`
                 : `HOLD ${secs(set.captureMs)}S TO CAPTURE`;
+            detailColor = c.contested ? CONTESTED_COLOR : TEXT_COLOR;
+        }
+        else if (c.state === 'owned' && c.owner && c.capturer)
+        {
+            // An unguarded castle being taken over.
+            status = c.contested ? 'CONTESTED' : `${c.capturer.name} TAKING OVER`;
+            statusColor = c.contested ? CONTESTED_COLOR : hexToInt(colorsOf(c.capturer).main);
+            detail = `${secs((1 - c.progress) * set.captureMs)}S LEFT  OWNER ${c.owner.name}`;
             detailColor = c.contested ? CONTESTED_COLOR : TEXT_COLOR;
         }
         else if (c.state === 'owned' && c.owner)

@@ -639,6 +639,7 @@ export class NetWorld implements GameWorld
                 return info ? this.playersById.get(info[1]) ?? null : null;
             };
             const before = c.state;
+            const ownerBefore = c.owner;
             c.state = CASTLE_STATES[row[1]] ?? 'neutral';
             c.owner = playerOf(row[2]);
             c.capturer = playerOf(row[3]);
@@ -647,7 +648,9 @@ export class NetWorld implements GameWorld
             c.awarded = row[6];
             c.nextGuardianMs = row[7] < 0 ? null : row[7];
             c.cooldownMs = row[8];
-            if (before === 'neutral' && c.state === 'owned' && !firstApply) (events.castlesCaptured ??= []).push(c);
+            // Taken: from neutral, or over from another owner.
+            const taken = c.state === 'owned' && (before === 'neutral' || (ownerBefore !== null && ownerBefore !== c.owner));
+            if (taken && !firstApply) (events.castlesCaptured ??= []).push(c);
         }
 
         // Fallen bodies.
