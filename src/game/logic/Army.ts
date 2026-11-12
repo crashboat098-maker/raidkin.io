@@ -100,6 +100,31 @@ export const WARRIOR_BODY: Body = { halfWidth: 3, height: 3 };
 const STUCK_CHECK_MS = 900;
 /** Moving less than this between checks while travelling counts as stuck. */
 const STUCK_DISTANCE = 4;
+/**
+ * Soldier detour searches allowed per update, across every army. A big
+ * battle jams hundreds of soldiers at once; searching for all of them in one
+ * tick stalled the server for hundreds of ms. The rest simply try again later.
+ */
+const DETOUR_SEARCHES_PER_UPDATE = 3;
+/**
+ * A soldier's detour search gives up after this many grid cells. Detours a
+ * soldier needs are short; a search that can't find one (the centre is walled
+ * off from here) would otherwise scan its whole window, the costliest case.
+ */
+const SOLDIER_DETOUR_VISITS = 2500;
+let detourBudgetAt = -1;
+let detourBudgetLeft = 0;
+function takeDetourSearch (now: number): boolean
+{
+    if (now !== detourBudgetAt)
+    {
+        detourBudgetAt = now;
+        detourBudgetLeft = DETOUR_SEARCHES_PER_UPDATE;
+    }
+    if (detourBudgetLeft <= 0) return false;
+    detourBudgetLeft--;
+    return true;
+}
 /** Warriors heading for the centre (not yet in formation) stop this close to it. */
 const CENTER_STANDOFF = 10;
 /** Fighting Warriors stop this close to their enemy (inside striking range). */
@@ -330,7 +355,7 @@ export function updateCluster (
         // 2. How do I get there? (re-planned a few times a second, staggered)
         if (now >= warrior.nextThinkAt)
         {
-            warrior.route = planRoute(warrior, target, centre, cluster.trail, obstacles, bounds);
+            warrior.route = planRoute(warrior, target, centre, cluster.trail, obstacles, bounds, now);
             warrior.nextThinkAt = now + settings.thinkIntervalMs * (0.75 + ((warrior.id * 37) % 50) / 100);
         }
 
@@ -420,9 +445,13 @@ export function updateCluster (
         {
             const travelling = warrior.route.mode !== 'slot' && !engaged;
             const movedSinceCheck = distance(warrior.position, warrior.lastCheckPosition);
-            if (travelling && movedSinceCheck < STUCK_DISTANCE && distance(warrior.position, centre) > CENTER_STANDOFF + 26)
+            // Only a wall in the way calls for a detour: when the straight line is
+            // clear, it's other soldiers blocking (a crowd or a battle), and a
+            // search around walls can't help.
+            if (travelling && movedSinceCheck < STUCK_DISTANCE && distance(warrior.position, centre) > CENTER_STANDOFF + 26
+                && !hasClearPath(obstacles, warrior.position, centre) && takeDetourSearch(now))
             {
-                const detour = findDetour(obstacles, bounds, warrior.position, centre);
+                const detour = findDetour(obstacles, bounds, warrior.position, centre, SOLDIER_DETOUR_VISITS);
                 if (detour && detour.length > 0)
                 {
                     warrior.route = { mode: 'detour', points: detour, index: 0 };
@@ -430,7 +459,8 @@ export function updateCluster (
                 }
             }
             warrior.lastCheckPosition = { x: warrior.position.x, y: warrior.position.y };
-            warrior.nextStuckCheckAt = now + STUCK_CHECK_MS;
+            // Staggered per soldier, so a whole army doesn't check on the same tick.
+            warrior.nextStuckCheckAt = now + STUCK_CHECK_MS * (0.75 + ((warrior.id * 53) % 50) / 100);
         }
 
         // 8. Rare emergency recovery if badly separated for a long time.
@@ -504,7 +534,7 @@ function formationTarget (centre: Vec2, slot: Vec2, obstacles: ObstacleMap, boun
  */
 function planRoute (
     warrior: Warrior, target: Vec2, centre: Vec2, trail: readonly Vec2[],
-    obstacles: ObstacleMap, bounds: Rect,
+    obstacles: ObstacleMap, bounds: Rect, now: number,
 ): Route
 {
     const from = warrior.position;
@@ -530,8 +560,10 @@ function planRoute (
     if (hasClearPath(obstacles, from, centre)) return { mode: 'center' };
     if (wetCrumb >= 0) return { mode: 'crumb', index: wetCrumb };
 
-    // Nothing in sight at all: search a small grid around us for a way to the centre.
-    const detour = findDetour(obstacles, bounds, warrior.position, centre);
+    // Nothing in sight at all: search a small grid around us for a way to the centre
+    // (if this update still has searches left; otherwise head for the centre and re-plan soon).
+    if (!takeDetourSearch(now)) return { mode: 'center' };
+    const detour = findDetour(obstacles, bounds, warrior.position, centre, SOLDIER_DETOUR_VISITS);
     if (detour && detour.length > 0) return { mode: 'detour', points: detour, index: 0 };
 
     return { mode: 'center' };
@@ -584,7 +616,7 @@ const DETOUR_MAX_CELLS = 20_000;
  * Breadth-first search on a coarse grid between two points, limited to a
  * window around them. Returns a short list of waypoints, or null.
  */
-export function findDetour (obstacles: ObstacleMap, bounds: Rect, from: Vec2, to: Vec2): Vec2[] | null
+export function findDetour (obstacles: ObstacleMap, bounds: Rect, from: Vec2, to: Vec2, maxVisits = Infinity): Vec2[] | null
 {
     const minX = Math.max(bounds.x, Math.min(from.x, to.x) - DETOUR_MARGIN);
     const minY = Math.max(bounds.y, Math.min(from.y, to.y) - DETOUR_MARGIN);
@@ -620,7 +652,7 @@ export function findDetour (obstacles: ObstacleMap, bounds: Rect, from: Vec2, to
     const queue = [startIndex];
     let found = -1;
 
-    for (let head = 0; head < queue.length; head++)
+    for (let head = 0; head < queue.length && head < maxVisits; head++)
     {
         const index = queue[head];
         const c = index % cols;
