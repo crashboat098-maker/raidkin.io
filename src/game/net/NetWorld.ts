@@ -45,6 +45,10 @@ const REACH_RESEND = 24;
 const PREDICTION_LEAD_S = 0.12;
 /** ...how much drift is tolerated while moving, and beyond what distance we just jump (world px). */
 const MOVING_TOLERANCE = 24;
+/** ...the tolerance also grows with speed (seconds of travel), since the server is always a round trip behind... */
+const MOVING_TOLERANCE_S = 0.25;
+/** ...after a turn, start or stop, the server's word is stale for about a round trip: don't correct meanwhile. */
+const TURN_GRACE_MS = 350;
 const SNAP_DISTANCE = 220;
 
 interface Decoded {
@@ -113,6 +117,9 @@ export class NetWorld implements GameWorld
     private readonly ownServerLead: Vec2 = { x: 0, y: 0 };
     /** Our steering point moved locally, ahead of the server (null until we have an army). */
     private predicted: MoverState | null = null;
+    /** Direction we last steered in (unit vector, or 0,0 standing still) and until when corrections wait. */
+    private steerDir: Vec2 = { x: 0, y: 0 };
+    private graceUntil = 0;
     private readonly moveBounds: Rect;
 
     constructor (private readonly config: Config, private readonly net: NetClient, name: string, color: string)
@@ -254,18 +261,39 @@ export class NetWorld implements GameWorld
         const errorX = targetX - p.x;
         const errorY = targetY - p.y;
         const error = Math.hypot(errorX, errorY);
+
+        // A turn, start or stop: the server hasn't heard it yet, so its position
+        // still points the old way. Trust our own movement for a round trip
+        // instead of pulling back toward it (that pull is what feels like lag).
+        const dirX = length > 0.01 ? input.x / length : 0;
+        const dirY = length > 0.01 ? input.y / length : 0;
+        const turned = (dirX === 0 && dirY === 0) !== (this.steerDir.x === 0 && this.steerDir.y === 0)
+            || dirX * this.steerDir.x + dirY * this.steerDir.y < 0.9;
+        if (turned)
+        {
+            this.steerDir = { x: dirX, y: dirY };
+            // Not back to back though (circling the mouse), or drift would never be corrected.
+            if (now >= this.graceUntil + TURN_GRACE_MS) this.graceUntil = now + TURN_GRACE_MS;
+        }
+        const settling = now < this.graceUntil;
+
         if (error > SNAP_DISTANCE)
         {
             // Far off (teleported, or a long stall): jump there.
             p.x = targetX;
             p.y = targetY;
         }
+        else if (settling)
+        {
+            // Just changed direction: no correction yet.
+        }
         else if (length > 0.01)
         {
             // While moving, small differences are just network wobble: leave them be.
-            if (error > MOVING_TOLERANCE)
+            const tolerance = Math.max(MOVING_TOLERANCE, this.you.speed * MOVING_TOLERANCE_S);
+            if (error > tolerance)
             {
-                const fix = ((error - MOVING_TOLERANCE) * Math.min(1, dt * 2)) / error;
+                const fix = ((error - tolerance) * Math.min(1, dt * 2)) / error;
                 p.x += errorX * fix;
                 p.y += errorY * fix;
             }
