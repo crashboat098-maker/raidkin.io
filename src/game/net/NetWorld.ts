@@ -35,7 +35,13 @@ type Config = typeof GameConfigType;
  * the moment that snapshot is reached, so effects line up with movement.
  */
 
-const INTERPOLATION_MS = 110;
+/**
+ * 200 rather than ~2 snapshots' worth: the live server sometimes pauses for
+ * 100-200 ms (a small cloud instance). With a shorter buffer, everything froze
+ * during a pause and then jumped ahead (it looked like rubber-banding). Your
+ * own army is predicted, so this delay only applies to what others do.
+ */
+const INTERPOLATION_MS = 200;
 /** Send steering at most this often (and at least this often while it changes). */
 const INPUT_INTERVAL_MS = 50;
 const INPUT_KEEPALIVE_MS = 400;
