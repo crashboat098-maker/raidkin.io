@@ -13,7 +13,9 @@ import { Tex } from './PlaceholderArt';
  *
  * The circle is a ring of small square "pixels" on the ground (under the
  * soldiers), so it reads as part of the pixel-art world:
- *   ready     gold rhythm (step in to spin)
+ *   ready     gold rhythm (step in and hold the circle to spin)
+ *   charging  the holder's colour fills clockwise (a countdown dial shows the
+ *             seconds left); flashes red, paused, while another army is inside
  *   spinning  the spinner's colour
  *   cooldown  muted grey, lighting back up as the cooldown runs out
  *
@@ -39,6 +41,10 @@ const MUTED_COLOR = 0x6a6a60;
 const NAME_COLOR = 0xf0c860;
 const TEXT_COLOR = 0xe8e0c8;
 const LOSS_COLOR = 0xd8432f;
+const CONTESTED_COLOR = 0xd8432f;
+const FLASH_MS = 260;
+/** The charge countdown dial (world px). */
+const DIAL_RADIUS = 12;
 
 /** Wheel radius (world px) and how far above the castle's front (its gate) the small one sits. */
 const WHEEL_RADIUS = 30;
@@ -75,6 +81,10 @@ interface CastleSprites {
     spinId: number;
     spinFrom: number;
     spinTo: number;
+    /** The charge countdown (seconds left inside a filling circle). */
+    dial: GameObjects.Graphics;
+    dialText: GameObjects.BitmapText;
+    dialKey: string;
     /** The slice under the pointer right now (SPIN_REWARDS index). */
     underPointer: number;
     /** The last spin whose landing was celebrated. */
@@ -107,6 +117,9 @@ export class CastleView
                 spinId: -1,
                 spinFrom: 0,
                 spinTo: 0,
+                dial: scene.add.graphics().setDepth(WHEEL_DEPTH).setVisible(false),
+                dialText: scene.add.bitmapText(0, 0, PIXEL_FONT, '').setOrigin(0.5, 0.5).setDepth(WHEEL_DEPTH + 1).setVisible(false),
+                dialKey: '',
                 underPointer: 0,
                 landedId: -1,
                 lastTime: 0,
@@ -135,10 +148,12 @@ export class CastleView
             s.ring.setVisible(onScreen);
             s.panel.setVisible(onScreen);
             for (const line of s.lines) line.setVisible(onScreen);
+            if (!onScreen) { s.dial.setVisible(false); s.dialText.setVisible(false); }
             this.turnWheel(c, s, dt, onScreen, landed);
             if (!onScreen) return;
             this.placeWheel(c, s, me);
-            this.drawRing(c, s);
+            this.drawRing(c, s, time);
+            this.drawDial(c, s, time);
             this.drawBanners(c, s);
             this.drawPanel(c, s);
         });
@@ -209,7 +224,49 @@ export class CastleView
         }
     }
 
-    private drawRing (c: CastleStatus, s: CastleSprites): void
+    /**
+     * The countdown while an army holds the circle: a small dial at a fixed
+     * spot in the circle (where the full wheel appears), filling clockwise in
+     * the holder's colour around the seconds left. Red while contested.
+     */
+    private drawDial (c: CastleStatus, s: CastleSprites, time: number): void
+    {
+        const charging = c.state === 'ready' && c.charger !== null && !c.spin;
+        s.dial.setVisible(charging);
+        s.dialText.setVisible(charging);
+        if (!charging || !c.charger) return;
+        const left = Math.max(0, Math.ceil((this.settings.chargeMs - c.chargedMs) / 1000));
+        const steps = 48;
+        const filled = Math.floor((c.chargedMs / this.settings.chargeMs) * steps);
+        const flashOn = c.contested && Math.floor(time / FLASH_MS) % 2 === 0;
+        const color = c.contested ? CONTESTED_COLOR : hexToInt(colorsOf(c.charger).main);
+        const key = `${filled}|${left}|${color}|${flashOn}`;
+        if (key === s.dialKey) return;
+        s.dialKey = key;
+
+        const { x, y } = s.full;
+        const g = s.dial;
+        g.clear();
+        g.fillStyle(0x000000, 0.45);
+        g.fillCircle(x + 1, y + 2, DIAL_RADIUS + 2);
+        g.fillStyle(0x0d0f0c, 0.85);
+        g.fillCircle(x, y, DIAL_RADIUS + 2);
+        // Track, then the filled part (clockwise from the top).
+        g.lineStyle(3, 0x3a3428, 1);
+        g.beginPath();
+        g.arc(x, y, DIAL_RADIUS - 1, 0, Math.PI * 2);
+        g.strokePath();
+        if (filled > 0)
+        {
+            g.lineStyle(3, color, flashOn ? 0.5 : 1);
+            g.beginPath();
+            g.arc(x, y, DIAL_RADIUS - 1, -Math.PI / 2, -Math.PI / 2 + (filled / steps) * Math.PI * 2);
+            g.strokePath();
+        }
+        s.dialText.setText(`${left}`).setTint(c.contested ? CONTESTED_COLOR : TEXT_COLOR).setPosition(x, y);
+    }
+
+    private drawRing (c: CastleStatus, s: CastleSprites, time: number): void
     {
         const { x, y, radius } = c.site;
         const dots = Math.max(24, Math.round((Math.PI * 2 * radius) / DOT_SPACING));
@@ -221,7 +278,17 @@ export class CastleView
         let filled = 0;
         let area = 0;
         const spinner = c.spin?.player ?? null;
-        if (spinner && c.spin && !c.spin.landed)
+        const flashOn = c.state === 'ready' && c.contested && Math.floor(time / FLASH_MS) % 2 === 0;
+        if (c.state === 'ready' && c.charger)
+        {
+            // Charging: the charger's colour fills clockwise from the top.
+            base = READY_COLOR;
+            baseAlpha = 0.3;
+            fill = hexToInt(colorsOf(c.charger).main);
+            filled = Math.floor((c.chargedMs / this.settings.chargeMs) * dots);
+            area = fill;
+        }
+        else if (spinner && c.spin && !c.spin.landed)
         {
             base = fill = hexToInt(colorsOf(spinner).main);
             baseAlpha = 0.8;
@@ -236,7 +303,9 @@ export class CastleView
             filled = Math.floor((1 - c.cooldownMs / this.settings.cooldownMs) * dots);
         }
 
-        const key = `${c.state}|${base}|${baseAlpha}|${fill}|${filled}`;
+        if (flashOn) { base = CONTESTED_COLOR; baseAlpha = 0.85; }
+
+        const key = `${c.state}|${base}|${baseAlpha}|${fill}|${filled}|${flashOn}`;
         if (key === s.ringKey) return;
         s.ringKey = key;
 
@@ -258,7 +327,7 @@ export class CastleView
             let color = isFilled ? fill : base;
             let alpha = isFilled ? 0.95 : baseAlpha;
             // Ready rings get a little gold rhythm so they read as "special ground".
-            if (!isFilled && c.state === 'ready' && k % 4 === 0) { color = READY_ACCENT; alpha = 0.7; }
+            if (!isFilled && c.state === 'ready' && !c.charger && !flashOn && k % 4 === 0) { color = READY_ACCENT; alpha = 0.7; }
             if (isFilled && c.state === 'cooldown' && !area) alpha = 0.55;
             g.fillStyle(0x000000, alpha * 0.5);
             g.fillRect(px + 1, py + 1, DOT_SIZE, DOT_SIZE);
@@ -303,11 +372,19 @@ export class CastleView
             detail = spin.player ? `FOR ${spin.player.name}` : '';
             border = statusColor;
         }
+        else if (c.state === 'ready' && c.charger)
+        {
+            status = `${c.charger.name} HOLDING`;
+            statusColor = hexToInt(colorsOf(c.charger).main);
+            detail = c.contested ? 'CONTESTED - PAUSED' : `SPIN IN ${secs(this.settings.chargeMs - c.chargedMs)}S`;
+            detailColor = c.contested ? CONTESTED_COLOR : TEXT_COLOR;
+            border = statusColor;
+        }
         else if (c.state === 'ready')
         {
-            status = 'LUCKY SPIN READY';
-            statusColor = NAME_COLOR;
-            detail = 'STEP IN TO SPIN';
+            status = c.contested ? 'CONTESTED' : 'LUCKY SPIN READY';
+            statusColor = c.contested ? CONTESTED_COLOR : NAME_COLOR;
+            detail = `HOLD ${secs(this.settings.chargeMs)}S TO SPIN`;
         }
         else
         {

@@ -18,7 +18,7 @@ import type { Vec2 } from '../logic/Types';
  */
 
 /** Bump when the messages change, so old pages are told to reload. */
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 
 // ---------------------------------------------------------------------------
 // Browser -> server
@@ -90,10 +90,11 @@ export interface SnapshotMessage {
 
 /**
  * [index, state (0 ready / 1 cooldown), cooldown ms,
- *  spin id (-1 no spin showing), spinner net (-1 none), reward (SPIN_REWARDS index), role (CASTLE_ROLES index), ms since the spin started]
- * The server alone picks the reward; browsers only animate the wheel to it.
+ *  spin id (-1 no spin showing), spinner net (-1 none), reward (SPIN_REWARDS index), role (CASTLE_ROLES index), ms since the spin started,
+ *  charger net (-1 none), ms charged, contested (0/1)]
+ * The server alone runs the timers and picks the reward; browsers only show them.
  */
-export type CastleRow = [number, number, number, number, number, number, number, number];
+export type CastleRow = [number, number, number, number, number, number, number, number, number, number, number];
 
 export const CASTLE_STATES = ['ready', 'cooldown'] as const;
 export const CASTLE_ROLES: readonly SoldierRole[] = ['warrior', 'archer', 'guardian'];
@@ -105,6 +106,7 @@ export function castleRow (c: CastleStatus, netOf: (p: Player) => number): Castl
     return [
         c.site.index, CASTLE_STATES.indexOf(c.state), Math.round(c.cooldownMs),
         s ? s.id : -1, s?.player ? netOf(s.player) : -1, s ? s.rewardId : 0, s ? CASTLE_ROLES.indexOf(s.role) : 0, s ? Math.round(s.elapsedMs) : 0,
+        c.charger ? netOf(c.charger) : -1, Math.round(c.chargedMs), c.contested ? 1 : 0,
     ];
 }
 

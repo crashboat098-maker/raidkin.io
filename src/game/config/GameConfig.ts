@@ -236,10 +236,12 @@ export const GameConfig = {
 
     /**
      * The three Lucky Spin castles (enchanted forest, volcanic wastes, swamp).
-     * Stepping into a ready castle's circle spins its reward wheel (rewards and
+     * Holding a ready castle's circle for `chargeMs` spins its reward wheel (rewards and
      * their chances: SPIN_REWARDS in logic/Castles.ts).
      */
     castles: {
+        /** Hold the circle this long (alone; another army pauses it, leaving resets it) to spin the wheel. */
+        chargeMs: 45_000,
         /** After a spin, the castle rests this long before it can be spun again. */
         cooldownMs: 60_000,
         /** The wheel spins this long before the reward lands... */

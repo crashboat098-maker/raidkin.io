@@ -238,10 +238,12 @@ export class NetWorld implements GameWorld
             this.net.send({ t: 'ping', c: wall });
         }
         // Castle countdowns and wheels run on between snapshots.
-        const { spinMs, resultMs } = this.config.castles;
+        const { spinMs, resultMs, chargeMs } = this.config.castles;
         for (const c of this.castles)
         {
             c.cooldownMs = Math.max(0, c.cooldownMs - dt * 1000);
+            // (Never past the end: only the server decides when the wheel spins.)
+            if (c.charger && !c.contested) c.chargedMs = Math.min(chargeMs - 1, c.chargedMs + dt * 1000);
             if (!c.spin) continue;
             c.spin.elapsedMs += dt * 1000;
             c.spin.landed = c.spin.elapsedMs >= spinMs;
@@ -708,14 +710,20 @@ export class NetWorld implements GameWorld
         {
             const c = this.castles[row[0]];
             if (!c) continue;
-            const [, state, cooldownMs, spinId, spinnerNet, rewardId, roleIndex, elapsedMs] = row;
+            const [, state, cooldownMs, spinId, spinnerNet, rewardId, roleIndex, elapsedMs, chargerNet, chargedMs, contested] = row;
+            const playerOf = (net: number) => {
+                const info = net >= 0 ? this.roster.get(net) : undefined;
+                return info ? this.playersById.get(info[1]) ?? null : null;
+            };
             c.state = CASTLE_STATES[state] ?? 'ready';
             c.cooldownMs = cooldownMs;
+            c.charger = playerOf(chargerNet);
+            c.chargedMs = chargedMs;
+            c.contested = contested === 1;
             if (spinId < 0) { c.spin = null; continue; }
             if (c.spin?.id === spinId) continue; // the same spin: our own clock keeps it running smoothly
-            const info = spinnerNet >= 0 ? this.roster.get(spinnerNet) : undefined;
             c.spin = {
-                id: spinId, player: info ? this.playersById.get(info[1]) ?? null : null, rewardId,
+                id: spinId, player: playerOf(spinnerNet), rewardId,
                 role: CASTLE_ROLES[roleIndex] ?? 'warrior', elapsedMs, landed: elapsedMs >= this.config.castles.spinMs,
             };
             if (!c.spin.landed) (events.castleSpins ??= []).push(c);

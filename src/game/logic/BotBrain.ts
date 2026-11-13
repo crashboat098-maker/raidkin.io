@@ -22,7 +22,7 @@ import type { Rect, Vec2 } from './Types';
  *   FLEE     a much stronger army is close (or we're hurt and it's not weaker)
  *   HUNT     a clearly weaker army is in reach (big bots also search further)
  *   FIGHT    a similar-sized army is close and we're healthy
- *   SPIN     walk into a nearby castle whose Lucky Spin wheel is ready
+ *   SPIN     hold a nearby castle's circle until its Lucky Spin wheel spins
  *   RECRUIT  a neutral Warrior is near (small armies weigh this highest)
  *   GATHER   a Soul Shard is near (staying away from threats)
  *   RECOVER  hurt: keep away from everyone and gather until healed
@@ -291,12 +291,18 @@ function decide (bot: Player, view: BotView, now: number, s: BotSettings): void
     const danger = visible.filter((r) => r.strength >= myStrength * s.engageRatio);
     const safe = (p: Vec2) => danger.every((d) => distance(p, d.centre) > 140);
 
-    // SPIN: walk into a castle whose Lucky Spin wheel is ready (stepping in spins it).
-    const castle = !injured ? castleGoal(view.castles ?? [], me, mine.length, s) : null;
+    // SPIN: walk into a castle whose Lucky Spin wheel is ready and hold the
+    // circle until it spins, milling about inside rather than walking out.
+    const castle = !injured ? castleGoal(bot, view.castles ?? [], me, mine.length, s) : null;
     if (castle)
     {
         state.mode = 'spin';
-        setTarget(state, { x: castle.site.x, y: castle.site.y }, now, me);
+        const { site } = castle;
+        const spread = site.radius * 0.3;
+        const spot = castle.charger === bot
+            ? { x: site.x + randRange(view.rng, -spread, spread), y: site.y + randRange(view.rng, -spread, spread) }
+            : { x: site.x, y: site.y };
+        setTarget(state, spot, now, me);
         return;
     }
 
@@ -339,19 +345,22 @@ function decide (bot: Player, view: BotView, now: number, s: BotSettings): void
 }
 
 /**
- * The nearest castle in reach whose wheel is ready, if the army is big enough.
- * One we're already standing in is skipped: a spin needs stepping in, so
- * the bot wanders off and can come back later.
+ * The castle we're charging (stay until it spins), else the nearest one in
+ * reach whose wheel is ready, if the army is big enough. A ready castle we're
+ * already deep inside without charging is skipped (we can't charge it without
+ * stepping out and back in, or someone else holds it): the bot moves on.
  */
-function castleGoal (castles: readonly CastleStatus[], me: Vec2, size: number, s: BotSettings): CastleStatus | null
+function castleGoal (bot: Player, castles: readonly CastleStatus[], me: Vec2, size: number, s: BotSettings): CastleStatus | null
 {
+    const charging = castles.find((c) => c.state === 'ready' && c.charger === bot);
+    if (charging) return charging;
     if (size < (s.castleMinSize ?? Infinity)) return null;
     const reach = s.castleSearchRadius ?? 0;
     let best: CastleStatus | null = null;
     for (const c of castles)
     {
         const d = distance(me, c.site);
-        if (c.state !== 'ready' || d > reach || d <= c.site.radius) continue;
+        if (c.state !== 'ready' || d > reach || d <= c.site.radius * 0.6) continue;
         if (!best || d < distance(me, best.site)) best = c;
     }
     return best;

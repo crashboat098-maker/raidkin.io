@@ -10,14 +10,16 @@ import type { Vec2 } from './Types';
  * the enchanted forest, the gothic fortress in the volcanic wastes, the swamp
  * castle). All three follow the same rules:
  *
- *   READY     the first army to step into the circle spins the wheel. The
- *             reward is decided right then (by whoever runs the World: the
- *             game server online), the wheel spins for `spinMs`, and the
- *             reward lands: soldiers join or (rarely) leave that army.
+ *   READY     an army that steps into the circle alone starts charging the
+ *             wheel; `chargeMs` (45 s) in the circle spins it. Another army
+ *             inside pauses the countdown (contested); leaving the circle
+ *             resets it. The reward is decided at the spin (by whoever runs
+ *             the World: the game server online), the wheel turns for
+ *             `spinMs`, and the reward lands: soldiers join or (rarely) leave.
  *   COOLDOWN  `cooldownMs` from the moment of the spin, then READY again.
  *
- * An army has to step in to spin: standing in the circle never spins it,
- * even when the cooldown ends with you inside. Leave and come back.
+ * Only an army that stepped in since the last spin can charge: everyone in
+ * the circle when a wheel spins has to leave and come back for another try.
  * Pure logic, no Phaser: the game server runs exactly this.
  */
 
@@ -89,11 +91,19 @@ export interface CastleStatus {
     state: CastleState;
     /** Time until the wheel is ready again (cooldown only, ms). */
     cooldownMs: number;
+    /** The army holding the circle to spin the wheel (ready only). */
+    charger: Player | null;
+    /** How long the charger has held the circle so far (ms, of `chargeMs`). */
+    chargedMs: number;
+    /** Another army is in the circle: the countdown is paused. */
+    contested: boolean;
     /** The latest spin (kept after it lands, so the result can be shown). */
     spin: CastleSpin | null;
 }
 
 export interface CastleSettings {
+    /** How long an army must hold the circle (uncontested time) to spin the wheel. */
+    chargeMs: number;
     cooldownMs: number;
     /** How long the wheel spins before the reward lands (ms). */
     spinMs: number;
@@ -127,7 +137,7 @@ export function castleSite (index: number, structure: Structure, biome: CastleBi
 
 export function newCastleStatus (site: CastleSite): CastleStatus
 {
-    return { site, state: 'ready', cooldownMs: 0, spin: null };
+    return { site, state: 'ready', cooldownMs: 0, spin: null, charger: null, chargedMs: 0, contested: false };
 }
 
 /** A reward landed: `count` soldiers of `role` join `player` (negative: leave). */
@@ -170,6 +180,7 @@ export class CastleField
     {
         this.statuses = sites.map(newCastleStatus);
         this.inside = sites.map(() => new Set());
+        this.eligible = sites.map(() => new Set());
     }
 
     /**
@@ -207,31 +218,70 @@ export class CastleField
             if (spin.landed && spin.elapsedMs >= s.spinMs + s.resultMs) c.spin = null;
         }
 
+        // Who is in each circle (re-checked every `checkIntervalMs`). Stepping in
+        // makes an army eligible to charge; stepping out ends that.
         this.sinceCheck += ms;
-        if (this.sinceCheck < s.checkIntervalMs) return events;
-        this.sinceCheck = 0;
+        if (this.sinceCheck >= s.checkIntervalMs)
+        {
+            this.sinceCheck = 0;
+            this.statuses.forEach((c, i) => {
+                const before = this.inside[i];
+                const now = new Set(armiesInCircle(c.site, players));
+                this.inside[i] = now;
+                const eligible = this.eligible[i];
+                for (const p of now) if (!before.has(p)) eligible.add(p);
+                for (const p of eligible) if (!now.has(p)) eligible.delete(p);
+            });
+        }
 
+        // Charging: one army alone in a ready circle counts down to the spin.
         this.statuses.forEach((c, i) => {
-            const before = this.inside[i];
-            const now = new Set(armiesInCircle(c.site, players));
-            this.inside[i] = now;
-            if (c.state !== 'ready') return;
-            // Only an army that just stepped in spins (several at once: one at random).
-            const entered = [...now].filter((p) => !before.has(p));
-            if (entered.length === 0) return;
-            const player = entered[Math.floor(this.rng() * entered.length)];
-            const rewardId = rollReward(this.rng);
-            const reward = SPIN_REWARDS[rewardId];
-            const role = reward.role === 'random' ? ROLES[Math.floor(this.rng() * ROLES.length)] : reward.role ?? 'warrior';
-            this.spinCount[i] = (this.spinCount[i] ?? 0) + 1;
-            c.spin = { id: this.spinCount[i], player, rewardId, role, elapsedMs: 0, landed: false };
-            c.state = 'cooldown';
-            c.cooldownMs = s.cooldownMs;
-            events.spins.push(c);
+            const inside = this.inside[i];
+            if (c.state !== 'ready')
+            {
+                c.charger = null;
+                c.chargedMs = 0;
+                c.contested = false;
+                return;
+            }
+            // The charger left the circle (or the match): its progress is lost.
+            if (c.charger && !inside.has(c.charger)) { c.charger = null; c.chargedMs = 0; }
+            if (!c.charger)
+            {
+                // Alone in the circle, and stepped in since the last spin: start charging.
+                const [only] = inside;
+                if (inside.size === 1 && this.eligible[i].has(only)) c.charger = only;
+            }
+            c.contested = inside.size > 1;
+            if (!c.charger || c.contested) return; // contested: paused
+            c.chargedMs = Math.min(s.chargeMs, c.chargedMs + ms);
+            if (c.chargedMs >= s.chargeMs) this.spin(c, i, c.charger, events);
         });
 
         return events;
     }
+
+    /** The wheel spins for `player`: the reward is decided now, the castle cools down. */
+    private spin (c: CastleStatus, i: number, player: Player, events: CastleEvents): void
+    {
+        const s = this.settings;
+        const rewardId = rollReward(this.rng);
+        const reward = SPIN_REWARDS[rewardId];
+        const role = reward.role === 'random' ? ROLES[Math.floor(this.rng() * ROLES.length)] : reward.role ?? 'warrior';
+        this.spinCount[i] = (this.spinCount[i] ?? 0) + 1;
+        c.spin = { id: this.spinCount[i], player, rewardId, role, elapsedMs: 0, landed: false };
+        c.state = 'cooldown';
+        c.cooldownMs = s.cooldownMs;
+        c.charger = null;
+        c.chargedMs = 0;
+        c.contested = false;
+        // Everyone in the circle now has to leave and come back for another try.
+        this.eligible[i].clear();
+        events.spins.push(c);
+    }
+
+    /** Per castle: armies that stepped in since the last spin (only they can charge). */
+    private readonly eligible: Set<Player>[];
 
     /** Spins so far per castle (ids keep counting after a spin is cleared). */
     private readonly spinCount: number[] = [];
