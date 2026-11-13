@@ -9,7 +9,7 @@ import { Tex } from './PlaceholderArt';
 
 /**
  * Draws the three Lucky Spin castles: the circle, banners, an info panel,
- * and the reward wheel over the castle's front.
+ * and the reward wheel (fixed at its castle, never following the camera).
  *
  * The circle is a ring of small square "pixels" on the ground (under the
  * soldiers), so it reads as part of the pixel-art world:
@@ -40,9 +40,13 @@ const NAME_COLOR = 0xf0c860;
 const TEXT_COLOR = 0xe8e0c8;
 const LOSS_COLOR = 0xd8432f;
 
-/** Wheel radius (world px) and how far above the castle's front (its gate) it sits. */
+/** Wheel radius (world px) and how far above the castle's front (its gate) the small one sits. */
 const WHEEL_RADIUS = 30;
 const WHEEL_LIFT = 16;
+/** The small wheel (someone else's spin, or a ready castle) is this size of the full one. */
+const SMALL_WHEEL_SCALE = 0.45;
+/** Your own spin: the full wheel sits this far above the circle's centre (world px). */
+const FULL_WHEEL_RISE = 30;
 /** Full turns the wheel makes before it settles on the result. */
 const SPIN_TURNS = 5;
 /** Idle turning speed while ready (radians per second). */
@@ -62,9 +66,11 @@ interface CastleSprites {
     lines: GameObjects.BitmapText[];
     panelKey: string;
     wheel: GameObjects.Container;
-    /** Holds the wheel and its fixed pointer; slid to stay on screen. */
+    /** Holds the wheel and its fixed pointer, at one of two fixed spots at the castle. */
     holder: GameObjects.Container;
-    home: { x: number; y: number };
+    /** Small wheel (others' spins, ready) at the gate; full wheel (your spin) in the circle. */
+    small: { x: number; y: number };
+    full: { x: number; y: number };
     /** The spin the wheel is showing, where it started turning from and where it ends. */
     spinId: number;
     spinFrom: number;
@@ -86,9 +92,10 @@ export class CastleView
             const { front } = c.site;
             const banners = [-1, 1].map((side) =>
                 scene.add.image(front.x + side * 34, front.y + 8, Tex.CastleBannerNeutral).setOrigin(0.5, 1).setDepth(front.y + 8).setFlipX(side < 0));
-            const wx = front.x;
-            const wy = front.y - WHEEL_LIFT;
+            const small = { x: front.x, y: front.y - WHEEL_LIFT };
             return {
+                small,
+                full: { x: c.site.x, y: c.site.y - FULL_WHEEL_RISE },
                 ring: scene.add.graphics().setDepth(RING_DEPTH),
                 ringKey: '',
                 banners,
@@ -96,7 +103,7 @@ export class CastleView
                 panel: scene.add.graphics().setDepth(PANEL_DEPTH),
                 lines: [0, 1, 2].map(() => scene.add.bitmapText(0, 0, PIXEL_FONT, '').setOrigin(0.5, 0).setDepth(PANEL_DEPTH + 1)),
                 panelKey: '',
-                ...buildWheelHolder(scene, wx, wy),
+                ...buildWheelHolder(scene, small.x, small.y),
                 spinId: -1,
                 spinFrom: 0,
                 spinTo: 0,
@@ -109,11 +116,12 @@ export class CastleView
 
     /**
      * Bring every castle's look up to date. Call once per frame.
+     * `me` is this screen's player (their own spins get the full wheel).
      * `landed` is called once when a wheel stops (for the scene's effects).
      */
     sync (
         castles: readonly CastleStatus[], time: number, view: { x: number; y: number; right: number; bottom: number },
-        landed?: (c: CastleStatus, color: number) => void,
+        me: Player | null, landed?: (c: CastleStatus, color: number) => void,
     ): void
     {
         castles.forEach((c, i) => {
@@ -129,7 +137,7 @@ export class CastleView
             for (const line of s.lines) line.setVisible(onScreen);
             this.turnWheel(c, s, dt, onScreen, landed);
             if (!onScreen) return;
-            this.placeWheel(s, view);
+            this.placeWheel(c, s, me);
             this.drawRing(c, s);
             this.drawBanners(c, s);
             this.drawPanel(c, s);
@@ -137,22 +145,19 @@ export class CastleView
     }
 
     /**
-     * The wheel sits at the castle's gate, but slides in from the edge of the
-     * screen when the gate is out of view (e.g. you're deep in the circle), so
-     * a spin can always be watched. It keeps clear of the HUD bars.
+     * The wheel never follows the camera: it has two fixed spots at its castle.
+     * Your own spin shows the full wheel in the circle, a little above its
+     * centre (where you're standing, so you can watch it). Anyone else's spin,
+     * and a ready wheel, is a small wheel at the castle's gate.
      */
-    private placeWheel (s: CastleSprites, view: { x: number; y: number; right: number; bottom: number }): void
+    private placeWheel (c: CastleStatus, s: CastleSprites, me: Player | null): void
     {
         if (!s.holder.visible) return;
-        const h = view.bottom - view.y;
-        const edge = WHEEL_RADIUS + 10;
-        const minY = view.y + h * 0.1 + edge;
-        const maxY = Math.max(minY, view.bottom - h * 0.08 - edge);
-        const minX = view.x + edge;
-        const maxX = Math.max(minX, view.right - edge);
-        const x = Math.round(Math.min(maxX, Math.max(minX, s.home.x)));
-        const y = Math.round(Math.min(maxY, Math.max(minY, s.home.y)));
-        if (x !== s.holder.x || y !== s.holder.y) s.holder.setPosition(x, y);
+        const mine = me !== null && c.spin?.player === me;
+        const spot = mine ? s.full : s.small;
+        const scale = mine ? 1 : SMALL_WHEEL_SCALE;
+        if (spot.x !== s.holder.x || spot.y !== s.holder.y) s.holder.setPosition(spot.x, spot.y);
+        if (s.holder.scale !== scale) s.holder.setScale(scale);
     }
 
     private turnWheel (c: CastleStatus, s: CastleSprites, dt: number, onScreen: boolean, landed?: (c: CastleStatus, color: number) => void): void
@@ -400,8 +405,8 @@ function buildWheel (scene: Scene): GameObjects.Container
     return scene.add.container(0, 0, [g, ...labels]);
 }
 
-/** The wheel and its fixed pointer at the top, in one holder that can be slid around. */
-function buildWheelHolder (scene: Scene, x: number, y: number): { wheel: GameObjects.Container; holder: GameObjects.Container; home: { x: number; y: number } }
+/** The wheel and its fixed pointer at the top, in one holder. */
+function buildWheelHolder (scene: Scene, x: number, y: number): { wheel: GameObjects.Container; holder: GameObjects.Container }
 {
     const wheel = buildWheel(scene);
     const top = -WHEEL_RADIUS - 6;
@@ -411,7 +416,7 @@ function buildWheelHolder (scene: Scene, x: number, y: number): { wheel: GameObj
     pointer.fillStyle(0xf8f0d8, 1);
     pointer.fillTriangle(-4, top, 4, top, 0, top + 7);
     const holder = scene.add.container(x, y, [wheel, pointer]).setDepth(WHEEL_DEPTH).setVisible(false);
-    return { wheel, holder, home: { x, y } };
+    return { wheel, holder };
 }
 
 function colorsOf (p: Player): { main: string; dark: string }

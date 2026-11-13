@@ -314,7 +314,7 @@ export class Battlefield extends Scene
         this.crown.sync(world.players, leaderId(rankPlayers(world.players)), time);
         this.fallenView.sync(time, camera.worldView);
         // Castle wheels; a burst in the result's colour around the circle when one lands.
-        this.castleView.sync(world.castles, time, camera.worldView, (c, color) => {
+        this.castleView.sync(world.castles, time, camera.worldView, human, (c, color) => {
             const hex = `#${color.toString(16).padStart(6, '0')}`;
             for (let k = 0; k < 8; k++)
             {
