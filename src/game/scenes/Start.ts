@@ -100,6 +100,8 @@ export class Start extends Scene
         // The start screen's theme (it waits for the first tap or key if the browser insists).
         this.sound.mute = isMuted();
         playMusic(this, Music.start);
+        // Leaving the start screen any way at all (PLAY, a reload of the scene...) ends its music.
+        this.events.once('shutdown', () => stopMusic(700));
         this.addMuteButton();
 
         // --- The panel ---

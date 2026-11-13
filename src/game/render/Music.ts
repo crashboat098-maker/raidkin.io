@@ -39,9 +39,12 @@ export function setMuted (scene: Scene, muted: boolean): void
     catch { /* private mode: it just won't be remembered */ }
 }
 
-let current: Sound.BaseSound | null = null;
+type Volumed = Sound.BaseSound & { volume: number; setVolume (v: number): unknown };
+
+let current: Volumed | null = null;
 let currentKey: string | null = null;
-let fadeTimer: number | null = null;
+/** The fade running on each sound (a new fade on a sound cancels its old one). */
+const fades = new Map<Sound.BaseSound, number>();
 
 /** Play `track` on a loop, fading in (nothing happens if it's already playing). */
 export function playMusic (scene: Scene, track: MusicTrack, fadeInMs = 1500): void
@@ -50,10 +53,14 @@ export function playMusic (scene: Scene, track: MusicTrack, fadeInMs = 1500): vo
     stopMusic(400);
     currentKey = track.key;
     const start = () => {
-        if (currentKey !== track.key) return; // something else was asked for meanwhile
-        const sound = scene.sound.add(track.key, { loop: true, volume: 0 });
+        if (currentKey !== track.key) return; // something else was asked for (or it was stopped) meanwhile
+        const sound = scene.sound.add(track.key, { loop: true, volume: 0 }) as Volumed;
         current = sound;
-        const begin = () => { if (current === sound) { sound.play({ seek: track.startAt ?? 0 }); ramp(sound, 0, track.volume, fadeInMs); } };
+        const begin = () => {
+            if (current !== sound) return; // stopped before the browser allowed sound
+            sound.play({ seek: track.startAt ?? 0 });
+            ramp(sound, 0, track.volume, fadeInMs);
+        };
         if (scene.sound.locked) scene.sound.once('unlocked', begin);
         else begin();
     };
@@ -63,28 +70,39 @@ export function playMusic (scene: Scene, track: MusicTrack, fadeInMs = 1500): vo
     scene.load.start();
 }
 
-/** Fade the current track out and stop it. */
+/** Fade the current track out, then stop and remove it (also if it never got to play). */
 export function stopMusic (fadeOutMs = 800): void
 {
     const sound = current;
     current = null;
     currentKey = null;
     if (!sound) return;
-    const from = (sound as Sound.BaseSound & { volume: number }).volume ?? 0;
-    ramp(sound, from, 0, fadeOutMs, () => sound.destroy());
+    const end = () => { cancelFade(sound); sound.stop(); sound.destroy(); };
+    if (!sound.isPlaying || fadeOutMs <= 0) { end(); return; }
+    ramp(sound, sound.volume, 0, fadeOutMs, end);
 }
 
 /** Change a sound's volume smoothly (timers, not tweens: the scene may be closing). */
-function ramp (sound: Sound.BaseSound, from: number, to: number, ms: number, done?: () => void): void
+function ramp (sound: Volumed, from: number, to: number, ms: number, done?: () => void): void
 {
-    if (fadeTimer !== null && done === undefined) window.clearInterval(fadeTimer);
+    cancelFade(sound);
     const steps = Math.max(1, Math.round(ms / FADE_STEP_MS));
     let step = 0;
     const timer = window.setInterval(() => {
         step++;
-        const v = from + (to - from) * Math.min(1, step / steps);
-        (sound as Sound.BaseSound & { setVolume (v: number): unknown }).setVolume?.(v);
-        if (step >= steps) { window.clearInterval(timer); if (fadeTimer === timer) fadeTimer = null; done?.(); }
+        try { sound.setVolume(from + (to - from) * Math.min(1, step / steps)); }
+        catch { step = steps; } // the sound is gone: just finish
+        if (step < steps) return;
+        cancelFade(sound);
+        done?.();
     }, FADE_STEP_MS);
-    if (done === undefined) fadeTimer = timer;
+    fades.set(sound, timer);
+}
+
+function cancelFade (sound: Sound.BaseSound): void
+{
+    const timer = fades.get(sound);
+    if (timer === undefined) return;
+    window.clearInterval(timer);
+    fades.delete(sound);
 }
