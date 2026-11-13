@@ -1,5 +1,6 @@
 import type { GameConfig as GameConfigType } from '../config/GameConfig';
 import { createWarrior, type SoldierRole, type Warrior } from '../logic/Army';
+import { newArenaStatus, type ArenaStatus } from '../logic/Arena';
 import { newCastleStatus, type CastleStatus } from '../logic/Castles';
 import { generateBattlefield, type BattlefieldLayout } from '../logic/BattlefieldLayout';
 import type { Death, Hit } from '../logic/Combat';
@@ -17,7 +18,7 @@ import type { Rect, Vec2 } from '../logic/Types';
 import { movementBounds, type WorldEvents } from '../logic/World';
 import type { NetClient } from './NetClient';
 import {
-    CASTLE_ROLES, CASTLE_STATES, JOIN_RECRUITED, NEUTRAL_AVAILABLE, roleFromCode, WARRIOR_GUARDIAN, NEUTRAL_FACING_LEFT, NEUTRAL_KINDS, NEUTRAL_MOVING, NEUTRAL_READY, PROTOCOL_VERSION, REJOIN_GRACE_MS,
+    ARENA_PHASES, CASTLE_ROLES, CASTLE_STATES, JOIN_RECRUITED, NEUTRAL_AVAILABLE, roleFromCode, WARRIOR_GUARDIAN, NEUTRAL_FACING_LEFT, NEUTRAL_KINDS, NEUTRAL_MOVING, NEUTRAL_READY, PROTOCOL_VERSION, REJOIN_GRACE_MS,
     WARRIOR_ARCHER, WARRIOR_BURNING, WARRIOR_FACING_LEFT, WARRIOR_MOVING,
     type BodyRow, type DefeatMessage, type RosterRow, type ServerMessage, type SnapPlayer, type SnapshotMessage, type StateMessage, type YouRow,
 } from './Protocol';
@@ -87,6 +88,8 @@ export class NetWorld implements GameWorld
     readonly shards: { shards: SoulShard[] };
     /** The castles, as the server last reported them. */
     readonly castles: CastleStatus[];
+    /** The arena, as the server last reported it. */
+    readonly arena: ArenaStatus | null;
     matchStartedAt: number | null = null;
     humanDefeated = false;
     /** The connection dropped mid-match and the army couldn't be taken back. */
@@ -147,6 +150,7 @@ export class NetWorld implements GameWorld
         this.neutrals = { units: forces.units };
         for (const u of forces.units) this.neutralsBySite.set(u.siteId, u);
         this.castles = this.layout.castles.map(newCastleStatus);
+        this.arena = this.layout.arena ? newArenaStatus(this.layout.arena) : null;
         this.human = this.makePlayer('you', name, color, 'human', this.layout.spawn);
 
         net.listen((m) => this.receive(m), () => this.dropped());
@@ -236,6 +240,16 @@ export class NetWorld implements GameWorld
         {
             this.nextPingAt = wall + PING_EVERY_MS;
             this.net.send({ t: 'ping', c: wall });
+        }
+        // The arena's timers run on between snapshots (never past what only the server decides).
+        if (this.arena)
+        {
+            const a = this.arena;
+            a.phaseMs += dt * 1000;
+            if (a.phase === 'open')
+            {
+                for (const z of a.zones) if (z.holder && !z.contested && !z.qualified) z.heldMs = Math.min(this.config.arena.qualifyMs - 1, z.heldMs + dt * 1000);
+            }
         }
         // Castle countdowns and wheels run on between snapshots.
         const { spinMs, resultMs, chargeMs } = this.config.castles;
@@ -703,6 +717,35 @@ export class NetWorld implements GameWorld
             shard.y = e.shardsRespawned[i + 2];
             shard.active = true;
             events.shardsRespawned.push(shard);
+        }
+
+        // The arena (decided by the server).
+        if (this.arena && m.arena)
+        {
+            const a = this.arena;
+            const r = m.arena;
+            const playerOf = (net: number) => {
+                const info = net >= 0 ? this.roster.get(net) : undefined;
+                return info ? this.playersById.get(info[1]) ?? null : null;
+            };
+            const before = a.phase;
+            a.phase = ARENA_PHASES[r[0]] ?? 'open';
+            a.phaseMs = r[1];
+            a.matchId = r[2];
+            a.winner = playerOf(r[3]);
+            a.zones.forEach((z, i) => {
+                const o = 4 + i * 4;
+                z.holder = playerOf(r[o]);
+                z.heldMs = r[o + 1];
+                z.qualified = (r[o + 2] & 1) !== 0;
+                z.contested = (r[o + 2] & 2) !== 0;
+                z.outcome = r[o + 3] < 0 ? null : r[o + 3];
+            });
+            if (a.phase === 'victory' && before !== 'victory' && !firstApply)
+            {
+                const loser = a.zones.map((z) => z.holder).find((p) => p !== a.winner) ?? null;
+                events.arenaFinished = { winner: a.winner, loser };
+            }
         }
 
         // Castles (decided by the server: the wheel here only animates to its result).

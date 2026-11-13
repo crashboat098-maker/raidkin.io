@@ -31,6 +31,10 @@ const GROUND_COLORS: Record<number, number> = {
     [GroundTile.SwampMoss]: 0x3c4c31,
     [GroundTile.SwampMossAlt]: 0x3f5034,
     [GroundTile.SwampCanopy]: 0x1d2a1a,
+    [GroundTile.CrystalMoss]: 0x34407a,
+    [GroundTile.CrystalMossAlt]: 0x373c70,
+    [GroundTile.CrystalGlow]: 0x4a5a9a,
+    [GroundTile.CrystalCanopy]: 0x1c2140,
 };
 const WATER = 0x3f8fc4;
 const LAVA = 0xe0602a;

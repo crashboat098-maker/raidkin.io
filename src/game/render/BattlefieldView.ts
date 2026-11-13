@@ -3,6 +3,7 @@ import { addWater } from './WaterView';
 import { addTerrain } from './TerrainView';
 import { addForestLife } from './ForestView';
 import { addSwampLife } from './SwampView';
+import { addCrystalLife, buildArenaScenery } from './CrystalView';
 import { swampAt } from '../logic/Biomes';
 import { addLavaRivers } from './LavaView';
 import { addLavaBridges } from './LavaBridgeView';
@@ -96,6 +97,8 @@ const TEXTURE_FOR: Record<Exclude<DecorationKind, 'runestone' | 'glowShroom' | '
     glowPlant: NatureTex.glowPlant,
     lilyPad: NatureTex.lilyPad,
     swampTotem: () => NatureTex.SwampTotem,
+    giantCrystal: NatureTex.giantCrystal,
+    crystalShard: NatureTex.crystalShard,
 };
 
 /** Big things that get a ground shadow (shadow width in world pixels). */
@@ -123,10 +126,11 @@ const SHADOW_WIDTH: Partial<Record<DecorationKind, number>> = {
     obsidian: 12,
     scorchedTree: 14,
     swampTree: 24,
+    giantCrystal: 18,
 };
 
 /** Tall things that turn see-through when your soldiers walk behind them. */
-const SEE_THROUGH_KINDS = new Set<DecorationKind>(['largeTree', 'pine', 'deadTree', 'elderTree', 'birch', 'willow', 'giantShroom', 'charredTree', 'moonTree', 'spiralTree', 'goldenOak', 'cypress', 'twistedYew', 'gothicRuin', 'scorchedTree', 'swampTree']);
+const SEE_THROUGH_KINDS = new Set<DecorationKind>(['largeTree', 'pine', 'deadTree', 'elderTree', 'birch', 'willow', 'giantShroom', 'charredTree', 'moonTree', 'spiralTree', 'goldenOak', 'cypress', 'twistedYew', 'gothicRuin', 'scorchedTree', 'swampTree', 'giantCrystal']);
 
 /** Things lying flat on the ground: soldiers walk over them, never behind them, so they're baked into the ground. */
 const FLAT_KINDS = new Set<DecorationKind>(['rockSmall', 'pebbles', 'flowers', 'bones', 'fairyRing', 'lilyPad']);
@@ -139,6 +143,7 @@ export function buildBattlefieldView (scene: Scene, layout: BattlefieldLayout, s
     addLavaBridges(scene, layout);
     addForestLife(scene, layout);
     addSwampLife(scene, layout);
+    addCrystalLife(scene, layout);
     const biomes = layout.biomes;
     addWater(scene, layout.water, layout.worldWidth, layout.worldHeight, Depth.Water, biomes ? (x, y) => swampAt(biomes, x, y) : undefined);
     addTrails(scene, layout, Depth.Trails);
@@ -149,6 +154,7 @@ export function buildBattlefieldView (scene: Scene, layout: BattlefieldLayout, s
         addDecoration(scene, decoration, seeThrough, flat);
     }
     bakeFlatDecorations(scene, flat, layout.worldWidth, layout.worldHeight, Depth.FlatDecorations);
+    buildArenaScenery(scene, layout);
 }
 
 /**

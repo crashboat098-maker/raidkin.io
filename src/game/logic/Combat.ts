@@ -107,6 +107,12 @@ function nearbyPairs (players: readonly Player[], margin: number): [ArmyExtent, 
  * army that moves away disengages naturally. Armies in `holdBack` (e.g. a
  * retreating bot) don't chase at all, but still defend themselves in reach.
  */
+/** Only the pairs of armies allowed to fight each other (e.g. nobody joins an arena duel). */
+function fightable<T extends { player: Player }> (pairs: [T, T][], canFight?: (a: Player, b: Player) => boolean): [T, T][]
+{
+    return canFight ? pairs.filter(([a, b]) => canFight(a.player, b.player)) : pairs;
+}
+
 /** One reusable grid per army, rebuilt when needed (soldiers move every frame). */
 const gridCache = new WeakMap<Player, SpatialGrid<Warrior>>();
 
@@ -125,11 +131,11 @@ const MOVING_SPEED = 20;
 /** Same spacing the army formation uses (GameConfig.army.formationSpacing). */
 const FORMATION_SPACING = 13;
 
-export function assignEngagements (players: readonly Player[], settings: CombatSettings, holdBack: (p: Player) => boolean): void
+export function assignEngagements (players: readonly Player[], settings: CombatSettings, holdBack: (p: Player) => boolean, canFight?: (a: Player, b: Player) => boolean): void
 {
     for (const p of players) for (const { cluster } of p.army.clusters) for (const w of cluster.warriors) w.engage = null;
 
-    const pairs = nearbyPairs(players, settings.engageRadius);
+    const pairs = fightable(nearbyPairs(players, settings.engageRadius), canFight);
     if (pairs.length === 0) return;
     const grids = new Map<Player, SpatialGrid<Warrior>>();
     const gridOf = (p: Player) => grids.get(p) ?? grids.set(p, soldierGrid(p)).get(p)!;
@@ -178,11 +184,11 @@ export function assignEngagements (players: readonly Player[], settings: CombatS
 }
 
 /** Every soldier whose attack is ready strikes the nearest enemy in reach. */
-export function resolveAttacks (players: readonly Player[], now: number, settings: CombatSettings, rng: Rng): Hit[]
+export function resolveAttacks (players: readonly Player[], now: number, settings: CombatSettings, rng: Rng, canFight?: (a: Player, b: Player) => boolean): Hit[]
 {
     const hits: Hit[] = [];
     const maxRange = Math.max(settings.attackRange, settings.archer.range);
-    const pairs = nearbyPairs(players, maxRange);
+    const pairs = fightable(nearbyPairs(players, maxRange), canFight);
     if (pairs.length === 0) return hits;
 
     // For each army, which enemy armies are close enough to matter.

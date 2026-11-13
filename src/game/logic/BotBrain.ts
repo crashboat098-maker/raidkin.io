@@ -1,4 +1,5 @@
 import { centroid, distance, findDetour } from './Army';
+import type { ArenaStatus } from './Arena';
 import type { CastleStatus } from './Castles';
 import { averageHealth, strength } from './Combat';
 import type { FallenBody } from './Fallen';
@@ -32,7 +33,7 @@ import type { Rect, Vec2 } from './Types';
  * for a while, so a bot never chases an unreachable opponent forever.
  */
 
-export type BotMode = 'explore' | 'gather' | 'recruit' | 'spin' | 'hunt' | 'fight' | 'flee' | 'recover';
+export type BotMode = 'explore' | 'gather' | 'recruit' | 'spin' | 'arena' | 'hunt' | 'fight' | 'flee' | 'recover';
 
 interface Pursuit {
     playerId: string;
@@ -61,6 +62,9 @@ export interface BotState {
     pursuitsAbandoned: number;
     /** The army stops growing at this many soldiers (no more shards or recruits). */
     maxSoldiers: number;
+    /** Since when we've held an arena zone (null: not holding one), and until when we leave the arena be. */
+    arenaSince: number | null;
+    arenaIgnoreUntil: number;
 }
 
 export interface BotSettings {
@@ -79,6 +83,12 @@ export interface BotSettings {
     castleMinSize?: number;
     /** ...within this distance (world px). */
     castleSearchRadius?: number;
+    /** Armies this big queue for the arena, within this distance of it... */
+    arenaMinSize?: number;
+    arenaSearchRadius?: number;
+    /** ...wait this long in a zone for an opponent, then give up for a while. */
+    arenaWaitMs?: number;
+    arenaIgnoreMs?: number;
 }
 
 /** What a bot can see of the world. */
@@ -90,6 +100,8 @@ export interface BotView {
     bodies?: readonly FallenBody[];
     /** The Lucky Spin castles. */
     castles?: readonly CastleStatus[];
+    /** The 1v1 arena. */
+    arena?: ArenaStatus | null;
     obstacles: ObstacleMap;
     bounds: Rect;
     rng: Rng;
@@ -112,6 +124,8 @@ export function createBotState (maxSoldiers = Infinity): BotState
         pursuit: null,
         ignoreUntil: new Map(),
         pursuitsAbandoned: 0,
+        arenaSince: null,
+        arenaIgnoreUntil: 0,
     };
 }
 
@@ -232,6 +246,16 @@ function decide (bot: Player, view: BotView, now: number, s: BotSettings): void
         rivals.push({ player: other, centre, strength: strength(other), distance: distance(centre, me) });
     }
     const visible = rivals.filter((r) => r.distance <= s.sightRadius);
+
+    // ARENA: queue in a free entry zone, hold it, and once inside fight to the end
+    // (a duellist never flees: there's nowhere to go).
+    const duty = arenaDuty(bot, view, me, myStrength, mine.length, injured, now, s);
+    if (duty)
+    {
+        state.mode = 'arena';
+        setTarget(state, duty, now, me);
+        return;
+    }
 
     // FLEE: a much stronger army close by, or any non-weaker one while we're hurt.
     // (Keep fleeing until the flight time is up, so we actually get away.)
@@ -363,6 +387,57 @@ function castleGoal (bot: Player, castles: readonly CastleStatus[], me: Vec2, si
         if (c.state !== 'ready' || d > reach || d <= c.site.radius * 0.6) continue;
         if (!best || d < distance(me, best.site)) best = c;
     }
+    return best;
+}
+
+/**
+ * Where the arena wants this bot, if anywhere: its zone while it queues and
+ * while the wheels spin; its opponent during the duel; a free zone to queue in
+ * (big enough, healthy, near, and not facing a far stronger army). A bot that
+ * waits too long for an opponent gives up and leaves the arena be for a while.
+ */
+function arenaDuty (bot: Player, view: BotView, me: Vec2, myStrength: number, size: number, injured: boolean, now: number, s: BotSettings): Vec2 | null
+{
+    const state = bot.bot!;
+    const a = view.arena;
+    if (!a) return null;
+    const zoneIndex = a.zones.findIndex((z) => z.holder === bot);
+    const zoneSite = zoneIndex >= 0 ? a.site.zones[zoneIndex] : null;
+    const millAbout = (z: { x: number; y: number; radius: number }) =>
+        ({ x: z.x + randRange(view.rng, -z.radius * 0.35, z.radius * 0.35), y: z.y + randRange(view.rng, -z.radius * 0.35, z.radius * 0.35) });
+
+    if (zoneSite && (a.phase === 'fight' || a.phase === 'victory'))
+    {
+        const foe = a.zones[1 - zoneIndex].holder;
+        const ws = foe && foe.respawnAt === null ? allWarriors(foe.army) : [];
+        return ws.length > 0 ? centroid(ws) : null;
+    }
+    if (zoneSite && (a.phase === 'countdown' || a.phase === 'spinning')) return millAbout(zoneSite);
+    if (a.phase !== 'open') { state.arenaSince = null; return null; }
+
+    if (zoneSite)
+    {
+        state.arenaSince ??= now;
+        if (now - state.arenaSince > (s.arenaWaitMs ?? Infinity))
+        {
+            state.arenaSince = null;
+            state.arenaIgnoreUntil = now + (s.arenaIgnoreMs ?? 0);
+            return null;
+        }
+        return millAbout(zoneSite);
+    }
+    state.arenaSince = null;
+    if (now < state.arenaIgnoreUntil || injured || size < (s.arenaMinSize ?? Infinity)) return null;
+    let best: Vec2 | null = null;
+    a.zones.forEach((z, i) => {
+        if (z.holder || z.contested) return;
+        const site = a.site.zones[i];
+        if (distance(me, site) > (s.arenaSearchRadius ?? 0)) return;
+        // Don't queue against an army far stronger than us.
+        const rival = a.zones[1 - i].holder;
+        if (rival && strength(rival) > myStrength * s.fleeRatio) return;
+        if (!best || distance(me, site) < distance(me, best)) best = { x: site.x, y: site.y };
+    });
     return best;
 }
 

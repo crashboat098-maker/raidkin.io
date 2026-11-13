@@ -4,7 +4,9 @@ import { generateTrails, routeTrail, trailTileMask, type Trail } from './Trails'
 import type { Rect, Vec2 } from './Types';
 import { placeVillages, type Village } from './Villages';
 import { extendRivers, generateWater, isWater, isWaterSurface, shiftWater, type WaterBody, type WaterLayout, type WaterSettings } from './Water';
-import { createBiomeMap, forestAt, regionOf, swampAt, volcanicAt, type BiomeMap } from './Biomes';
+import { createBiomeMap, crystalAt, forestAt, regionOf, swampAt, volcanicAt, type BiomeMap } from './Biomes';
+import { arenaColliders, arenaFootprint, inArenaFootprint, type ArenaSite } from './Arena';
+import { decorateCrystals, planArena } from './CrystalBiome';
 import { decorateForest, planForest } from './EnchantedForest';
 import { decorateWastes, planWastes } from './VolcanicWastes';
 import { decorateSwamp, planSwamp } from './Swamp';
@@ -44,9 +46,14 @@ export const GroundTile = {
     SwampMoss: 17,
     SwampMossAlt: 18,
     SwampCanopy: 19,
+    // Crystal biome
+    CrystalMoss: 20,
+    CrystalMossAlt: 21,
+    CrystalGlow: 22,
+    CrystalCanopy: 23,
 } as const;
 
-export const GROUND_TILE_COUNT = 20;
+export const GROUND_TILE_COUNT = 24;
 
 /** Decorative glow colours. Cyan is deliberately absent: it's reserved for Soul Shards. */
 export type Accent = 'green' | 'purple' | 'amber';
@@ -79,7 +86,9 @@ export type DecorationKind =
     // Volcano surroundings: half-burnt trees where grass meets ash, small ground fires
     | 'scorchedTree' | 'smallFire'
     // Swamp: twisted vine-hung trees, bushes, mushrooms, glowing plants, lily pads, a village totem
-    | 'swampTree' | 'swampBush' | 'swampShroom' | 'glowPlant' | 'lilyPad' | 'swampTotem';
+    | 'swampTree' | 'swampBush' | 'swampShroom' | 'glowPlant' | 'lilyPad' | 'swampTotem'
+    // Crystal biome: towering glowing crystals (blue, violet, green) and small shards
+    | 'giantCrystal' | 'crystalShard';
 
 export interface Decoration {
     kind: DecorationKind;
@@ -126,6 +135,9 @@ export const DECORATION_VARIANTS: Partial<Record<DecorationKind, number>> = {
     swampShroom: 2,
     glowPlant: 2,
     lilyPad: 2,
+    // Colour is variant % 3 (blue, violet, green); giant crystals come in two shapes.
+    giantCrystal: 6,
+    crystalShard: 3,
 };
 
 /**
@@ -169,6 +181,7 @@ export const DECORATION_COLLIDERS: Partial<Record<DecorationKind, { width: numbe
     scorchedTree: { width: 6, depth: 4 },
     swampTree: { width: 8, depth: 5 },
     swampTotem: { width: 6, depth: 4 },
+    giantCrystal: { width: 12, depth: 5 },
 };
 
 /**
@@ -218,6 +231,8 @@ export interface BattlefieldLayout {
     structures: Structure[];
     /** The three Lucky Spin castles and their circles (none on the original-size map). */
     castles: CastleSite[];
+    /** The 1v1 arena in the crystal biome (null on the original-size map). */
+    arena: ArenaSite | null;
     /** Visual terrain objects (some are solid, see DECORATION_COLLIDERS). */
     decorations: Decoration[];
     /** Every solid rectangle on the map (structures + solid decorations). */
@@ -430,6 +445,7 @@ function generateCore (settings: LayoutSettings, openEdges: boolean): Battlefiel
         villages,
         structures,
         castles: [],
+        arena: null,
         decorations,
         obstacles,
         itemSpawnTiles,
@@ -484,7 +500,8 @@ function expandBattlefield (core: BattlefieldLayout, settings: LayoutSettings, e
     const edgeWobble = valueNoise(rng, cols, rows, 3);
     const tileCentre = (col: number, row: number) => ({ x: (col + 0.5) * T, y: (row + 0.5) * T });
     const ground = buildGround(rng, cols, rows, darkness, dirtiness, edgeWobble,
-        (c, r) => heatAt(tileCentre(c, r)), (c, r) => faeAt(tileCentre(c, r)), (c, r) => swampAt(biomes, (c + 0.5) * T, (r + 0.5) * T));
+        (c, r) => heatAt(tileCentre(c, r)), (c, r) => faeAt(tileCentre(c, r)), (c, r) => swampAt(biomes, (c + 0.5) * T, (r + 0.5) * T),
+        (c, r) => crystalAt(biomes, (c + 0.5) * T, (r + 0.5) * T));
     const oldBorder = new Set<number>([GroundTile.Canopy, GroundTile.CanopyAlt, GroundTile.Cliff]);
     core.ground.forEach((line, r) => line.forEach((tile, c) => { if (!oldBorder.has(tile)) ground[r + expand][c + expand] = tile; }));
 
@@ -492,6 +509,11 @@ function expandBattlefield (core: BattlefieldLayout, settings: LayoutSettings, e
     const water = shiftWater(core.water, off, worldWidth, worldHeight);
     extendRivers(water, createRng(seed ^ 0x51ee), coreArea, playArea);
     const wet = (p: Vec2) => isWaterSurface(water, p.x, p.y);
+
+    // 4b. The crystal biome's 1v1 arena (bottom-left), on the driest spot near its heart.
+    const arena = planArena(regionOf(biomes, 'crystal')!, coreArea, playArea, wet);
+    const arenaRects = arena ? arenaFootprint(arena).map((c) => ({ x: c.center.x - c.radius, y: c.center.y - c.radius, width: c.radius * 2, height: c.radius * 2 })) : [];
+    const inArena = (p: Vec2, margin = 0) => inArenaFootprint(arena, p, margin);
 
     // 5. The enchanted forest (top-left): the giant castle, the fae village, landmarks, folk.
     const forest = planForest(createRng(seed ^ 0xfae5), {
@@ -588,6 +610,7 @@ function expandBattlefield (core: BattlefieldLayout, settings: LayoutSettings, e
     // New roads steer around buildings and around the original map's solid scenery
     // (rocks, trees), which stays exactly where it was.
     const avoid = [
+        ...arenaRects,
         ...structures.map((s) => structureArea(s, 6)),
         ...[...core.decorations, ...forest.village.decorations, ...forest.groundsDecor, ...wastes.villages.flatMap((v) => v.decorations), ...swamp.villages.flatMap((v) => v.decorations)].flatMap((d) => {
             const r = decorationCollider(d);
@@ -760,7 +783,7 @@ function expandBattlefield (core: BattlefieldLayout, settings: LayoutSettings, e
         spawnClearRadius: settings.spawnClearRadius,
         darknessAt: (p) => darkness[clampIndex(p.y / T, rows)][clampIndex(p.x / T, cols)],
         onTrail,
-        blocked: (p) => inCore(p) || inVillage(p) || wet(p) || nearWater(p) || heatAt(p) > 0.3 || faeAt(p) > 0.15 || bogAt(p) > 0.3 || nearLava(p, LAVA_BANK),
+        blocked: (p) => inCore(p) || inVillage(p) || wet(p) || nearWater(p) || heatAt(p) > 0.3 || faeAt(p) > 0.15 || bogAt(p) > 0.3 || nearLava(p, LAVA_BANK) || inArena(p, 20) || crystalAt(biomes, p.x, p.y) > 0.4,
         biomeAt: heatAt,
         nearWater,
         waterSurface: wet,
@@ -807,7 +830,8 @@ function expandBattlefield (core: BattlefieldLayout, settings: LayoutSettings, e
             !inVillage(p) && !wet(p) && !nearWater(p) && !inPool(p, 12) && !nearLava(p, 22),
         playArea,
     });
-    const decorations = [...allSoFar, ...forestDecor, ...wastesDecor, ...swampDecor, ...bankDecor, ...volcanoEdge];
+    const crystalDecor = decorateCrystals(createRng(seed ^ 0xc7a1), { biomes, playArea, solids, isFree: (p) => isFree(p) && !inArena(p, 26) });
+    const decorations = [...allSoFar, ...forestDecor, ...wastesDecor, ...swampDecor, ...bankDecor, ...volcanoEdge, ...crystalDecor];
 
     const obstacles: Rect[] = [
         ...structures.flatMap(structureColliders),
@@ -816,11 +840,13 @@ function expandBattlefield (core: BattlefieldLayout, settings: LayoutSettings, e
             return collider ? [collider] : [];
         }),
         ...pools.map(lavaPoolCollider),
+        ...(arena ? arenaColliders(arena) : []),
     ];
     const itemSpawnTiles = findItemSpawnTiles(cols, rows, T, playArea, structures, decorations)
         .filter((tile) => {
             const x = (tile % cols) * T;
             const y = Math.floor(tile / cols) * T;
+            if (inArena({ x: x + 8, y: y + 8 }, 8)) return false;
             return ![[2, 2], [14, 2], [2, 14], [14, 14], [8, 8]].some(([dx, dy]) => isWater(water, x + dx, y + dy) || inPool({ x: x + dx, y: y + dy }, 10));
         });
 
@@ -842,6 +868,7 @@ function expandBattlefield (core: BattlefieldLayout, settings: LayoutSettings, e
         villages,
         structures,
         castles,
+        arena,
         decorations,
         obstacles,
         itemSpawnTiles,
@@ -929,6 +956,7 @@ function buildGround (
     biome: (col: number, row: number) => number = () => 0,
     forest?: (col: number, row: number) => number,
     swamp?: (col: number, row: number) => number,
+    crystal?: (col: number, row: number) => number,
 ): number[][]
 {
     const ground: number[][] = [];
@@ -949,10 +977,22 @@ function buildGround (
             const fae = forest ? forest(col, row) + jitter(rng, 0.14) : 0;
             // Swamp: dark wet moss with mud patches, fading into the grass through dark grass and moss.
             const bog = swamp ? swamp(col, row) + jitter(rng, 0.14) : 0;
+            // Crystal biome: blue-violet moss with glinting crystal grit. (Not rolled without one.)
+            const shine = crystal ? crystal(col, row) + jitter(rng, 0.14) : 0;
 
             if (distanceToEdge < canopyDepth)
             {
-                line.push(heat > 0.5 ? GroundTile.Cliff : fae > 0.5 ? GroundTile.FaeCanopy : bog > 0.5 ? GroundTile.SwampCanopy : rng() < 0.5 ? GroundTile.Canopy : GroundTile.CanopyAlt);
+                line.push(heat > 0.5 ? GroundTile.Cliff : fae > 0.5 ? GroundTile.FaeCanopy : bog > 0.5 ? GroundTile.SwampCanopy : shine > 0.5 ? GroundTile.CrystalCanopy : rng() < 0.5 ? GroundTile.Canopy : GroundTile.CanopyAlt);
+            }
+            else if (shine > 0.5)
+            {
+                const r = rng();
+                line.push(r < 0.55 ? GroundTile.CrystalMoss : r < 0.92 ? GroundTile.CrystalMossAlt : GroundTile.CrystalGlow);
+            }
+            else if (shine > 0.3)
+            {
+                const r = rng();
+                line.push(r < 0.4 ? GroundTile.CrystalMossAlt : r < 0.75 ? GroundTile.DarkGrass : GroundTile.DarkGrassAlt);
             }
             else if (bog > 0.5)
             {
@@ -1847,6 +1887,8 @@ const DECORATION_COVER: Partial<Record<DecorationKind, { width: number; height: 
     smallFire: { width: 12, height: 12 },
     swampTree: { width: 38, height: 46 },
     swampTotem: { width: 10, height: 22 },
+    giantCrystal: { width: 26, height: 44 },
+    crystalShard: { width: 10, height: 10 },
 };
 
 /** Extra empty space kept around structures, and from the map edge, for items. */

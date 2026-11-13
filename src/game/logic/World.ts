@@ -1,5 +1,6 @@
 import type { GameConfig as GameConfigType } from '../config/GameConfig';
-import { addWarrior, findFreeSpotNear, WARRIOR_BODY, type Cluster, type SoldierRole, type Warrior } from './Army';
+import { addWarrior, findFreeSpotNear, formationSlots, WARRIOR_BODY, type Cluster, type SoldierRole, type Warrior } from './Army';
+import { ArenaField, type ArenaStatus } from './Arena';
 import { generateBattlefield, type BattlefieldLayout } from './BattlefieldLayout';
 import { botInput, createBotState, isRetreating } from './BotBrain';
 import { CastleField, type CastleStatus } from './Castles';
@@ -12,7 +13,7 @@ import { ObstacleMap } from './Obstacles';
 import { createIdSource, createPlayer, createStartingArmy, type Player } from './Player';
 import type { DefeatStats, GameWorld } from './GameWorld';
 import { finalRank } from './Leaderboard';
-import { allWarriors, nearestCluster, secondsUntilRegroup, splitArmy, totalSoldiers, updatePlayerArmy } from './PlayerArmy';
+import { allWarriors, createPlayerArmy, nearestCluster, secondsUntilRegroup, splitArmy, totalSoldiers, updatePlayerArmy } from './PlayerArmy';
 import { applyGreenShards, applySoulShards, createPlayerResources } from './PlayerResources';
 import { createRng, type Rng } from './Random';
 import { boxAround, SoulShardField, type SoulShard } from './SoulShards';
@@ -65,8 +66,10 @@ export interface WorldEvents {
     lavaBurns: Warrior[];
     /** Castle wheels that started spinning this frame (soldiers won arrive in `summoned` when it lands). */
     castleSpins?: CastleStatus[];
-    /** Soldiers lost to a castle's unlucky spin. */
-    castleLosses?: Warrior[];
+    /** Soldiers that simply vanished from an army (an unlucky spin, a lost arena duel...). */
+    soldiersLost?: Warrior[];
+    /** An arena duel ended this frame (winner null: nobody was left). */
+    arenaFinished?: { winner: Player | null; loser: Player | null };
 
     // Only from online play (NetWorld), where the server reports what happened:
     /** Soldiers already there when you joined (shown without an effect). */
@@ -125,6 +128,8 @@ export class World implements GameWorld
     readonly fallen: FallenField;
     /** The three Lucky Spin castles. */
     private readonly castleField: CastleField;
+    /** The crystal biome's 1v1 arena (null on maps without one). */
+    private readonly arenaField: ArenaField | null;
     readonly players: Player[] = [];
     readonly human: Player;
     readonly nextUnitId: () => number;
@@ -147,6 +152,7 @@ export class World implements GameWorld
         this.neutrals = new NeutralForces(this.layout, this.obstacles, config.neutrals, config.world.seed + 2, this.nextUnitId);
         this.fallen = new FallenField(config.fallen);
         this.castleField = new CastleField(this.layout.castles, config.castles, this.rng);
+        this.arenaField = this.layout.arena ? new ArenaField(this.layout.arena, config.arena, this.rng) : null;
 
         this.human = createPlayer('you', this.layout.spawn, this.nextUnitId, {
             name: options.humanName ?? 'YOU', kind: 'human', colorId: options.humanColor ?? 'crimson', size: options.humanSize ?? 1,
@@ -219,6 +225,12 @@ export class World implements GameWorld
     get castles (): readonly CastleStatus[]
     {
         return this.castleField.statuses;
+    }
+
+    /** The arena's state (phase, zones, contestants, wheels...), or null. */
+    get arena (): ArenaStatus | null
+    {
+        return this.arenaField?.status ?? null;
     }
 
     get bots (): Player[]
@@ -297,12 +309,14 @@ export class World implements GameWorld
         const living = this.players.filter((p) => this.isAlive(p));
 
         // 2. Who fights whom this frame (soldiers step toward nearby enemies).
-        assignEngagements(living, c.combat, (p) => isRetreating(p, now));
+        // (Arena duellists only fight each other: nobody outside helps or harms them.)
+        const canFight = this.arenaField ? (a: Player, b: Player) => this.arenaField!.canFight(a, b) : undefined;
+        assignEngagements(living, c.combat, (p) => isRetreating(p, now), canFight);
 
         // 3. Movement: the human from the keyboard, bots from their brains.
         const botView = {
             players: living, shards: this.shards.shards, neutrals: this.neutrals.units, bodies: this.fallen.recruitable(),
-            castles: this.castleField.statuses, obstacles: this.obstacles, bounds: this.layout.playArea, rng: this.rng,
+            castles: this.castleField.statuses, arena: this.arena, obstacles: this.obstacles, bounds: this.layout.playArea, rng: this.rng,
         };
         const surrenders: [Player, Vec2][] = [];
         for (const p of living)
@@ -333,7 +347,7 @@ export class World implements GameWorld
         }
 
         // 4. Fighting: strikes, deaths, eliminations.
-        events.hits = resolveAttacks(living, now, c.combat, this.rng);
+        events.hits = resolveAttacks(living, now, c.combat, this.rng, canFight);
         // Lava rivers burn whoever stands in them (each soldier on its own; bridges are safe).
         events.lavaBurns = this.burnInLava(living, now);
         events.deaths = removeDead(living, events.hits);
@@ -452,7 +466,28 @@ export class World implements GameWorld
             {
                 for (let i = 0; i < count; i++) events.summoned.push({ warrior: this.summon(player, role), owner: player });
             }
-            else (events.castleLosses ??= []).push(...this.loseSoldiers(player, -count));
+            else (events.soldiersLost ??= []).push(...this.loseSoldiers(player, -count));
+        }
+
+        // 7d. The arena: entry zones, countdown, wheels, the duel. Wheel rewards are
+        //     Warriors (ignoring a bot's size cap) or losses (never the last soldier);
+        //     the World moves the duellists in when the gates open, and the winner out.
+        if (this.arenaField)
+        {
+            const arena = this.arenaField.update(dt, stillAlive);
+            for (const { player, count } of arena.awards)
+            {
+                if (count > 0) for (let i = 0; i < count; i++) events.summoned.push({ warrior: this.summon(player, 'warrior'), owner: player });
+                else (events.soldiersLost ??= []).push(...this.loseSoldiers(player, -count));
+            }
+            for (const { player, to, inside } of arena.moves) this.moveArmy(player, to, inside);
+            for (const loser of arena.forfeits)
+            {
+                const gone = [...allWarriors(loser.army)];
+                for (const { cluster } of loser.army.clusters) cluster.warriors = [];
+                (events.soldiersLost ??= []).push(...gone);
+            }
+            if (arena.finished) events.arenaFinished = arena.finished;
         }
 
         // Track each army's largest size this run.
@@ -507,6 +542,48 @@ export class World implements GameWorld
         const centre = cluster.center.position;
         const spot = findFreeSpotNear(this.obstacles, this.layout.playArea, centre, WARRIOR_BODY, 40) ?? centre;
         return addWarrior(cluster, this.nextUnitId(), spot, this.maxHpOf(role), role);
+    }
+
+    /**
+     * Move a whole army to `to` at once (into the arena, or the winner back out):
+     * every cluster joins up, and the soldiers stand in formation around `to`.
+     * Inside the arena they're kept on its floor; outside, on open ground.
+     */
+    private moveArmy (p: Player, to: Vec2, inside: boolean): void
+    {
+        const warriors = [...allWarriors(p.army)];
+        const army = createPlayerArmy({ ...to });
+        const cluster = army.clusters[0].cluster;
+        const slots = formationSlots(this.config.army.formationSpacing, Math.max(30, warriors.length));
+        const site = this.layout.arena;
+        warriors.forEach((w, i) => {
+            let x = to.x + slots[i].x;
+            let y = to.y + slots[i].y;
+            if (inside && site)
+            {
+                // Keep everyone on the arena floor, clear of the wall.
+                const dx = x - site.center.x;
+                const dy = y - site.center.y;
+                const d = Math.hypot(dx, dy);
+                const max = site.radius - 12;
+                if (d > max) { x = site.center.x + (dx / d) * max; y = site.center.y + (dy / d) * max; }
+            }
+            else
+            {
+                const spot = findFreeSpotNear(this.obstacles, this.layout.playArea, { x, y }, WARRIOR_BODY, 40);
+                if (spot) { x = spot.x; y = spot.y; }
+            }
+            w.position.x = x;
+            w.position.y = y;
+            w.velocity.x = 0;
+            w.velocity.y = 0;
+            w.engage = null;
+            w.slot = i;
+            w.route = { mode: 'slot' };
+            w.lastCheckPosition = { x, y };
+        });
+        cluster.warriors = warriors;
+        p.army = army;
     }
 
     /**

@@ -6,6 +6,7 @@ import { Depth } from './BattlefieldView';
 import { hexToInt, Palette, type ArmyColor } from './Palette';
 import { PIXEL_FONT } from './PixelFont';
 import { Tex } from './PlaceholderArt';
+import { buildWheelHolder, keepLabelsUpright, sliceUnderPointer, spinRotation, spinTarget, WHEEL_DEPTH, type WheelSlice } from './Wheel';
 
 /**
  * Draws the three Lucky Spin castles: the circle, banners, an info panel,
@@ -32,8 +33,6 @@ const DOT_SIZE = 2;
 const RING_DEPTH = Depth.FlatDecorations + 0.5;
 /** Panels and wheels sit with the army name tags, above the fighting. */
 const PANEL_DEPTH = 849_000;
-/** The wheel floats above everything on the battlefield, army names and crown included. */
-const WHEEL_DEPTH = 850_100;
 
 const READY_COLOR = 0xe8d8a0;
 const READY_ACCENT = 0xf0c860;
@@ -46,15 +45,12 @@ const FLASH_MS = 260;
 /** The charge countdown dial (world px). */
 const DIAL_RADIUS = 12;
 
-/** Wheel radius (world px) and how far above the castle's front (its gate) the small one sits. */
-const WHEEL_RADIUS = 30;
+/** How far above the castle's front (its gate) the small wheel sits. */
 const WHEEL_LIFT = 16;
 /** The small wheel (someone else's spin, or a ready castle) is this size of the full one. */
 const SMALL_WHEEL_SCALE = 0.45;
 /** Your own spin: the full wheel sits this far above the circle's centre (world px). */
 const FULL_WHEEL_RISE = 30;
-/** Full turns the wheel makes before it settles on the result. */
-const SPIN_TURNS = 5;
 /** Idle turning speed while ready (radians per second). */
 const IDLE_SPEED = 0.35;
 
@@ -62,6 +58,13 @@ const ROLE_COLORS: Record<SoldierRole, number> = { warrior: 0xc8503c, archer: 0x
 const ROLE_NAME: Record<SoldierRole, string> = { warrior: 'WARRIORS', archer: 'ARCHERS', guardian: 'GUARDIANS' };
 const RARE_COLOR = 0xf0c860;
 const LOSS_SLICE = 0x2a1618;
+
+/** The castle wheel: one slice per reward (coloured by class), each with its amount. */
+const CASTLE_SLICES: readonly WheelSlice[] = SPIN_REWARDS.map((r) => ({
+    text: `${r.count}`,
+    color: r.count < 0 ? LOSS_SLICE : r.role === 'random' ? RARE_COLOR : ROLE_COLORS[r.role ?? 'warrior'],
+    textColor: r.count < 0 ? LOSS_COLOR : 0x1a120a,
+}));
 
 interface CastleSprites {
     ring: GameObjects.Graphics;
@@ -113,7 +116,7 @@ export class CastleView
                 panel: scene.add.graphics().setDepth(PANEL_DEPTH),
                 lines: [0, 1, 2].map(() => scene.add.bitmapText(0, 0, PIXEL_FONT, '').setOrigin(0.5, 0).setDepth(PANEL_DEPTH + 1)),
                 panelKey: '',
-                ...buildWheelHolder(scene, small.x, small.y),
+                ...buildWheelHolder(scene, small.x, small.y, CASTLE_SLICES),
                 spinId: -1,
                 spinFrom: 0,
                 spinTo: 0,
@@ -197,22 +200,14 @@ export class CastleView
         if (s.spinId !== spin.id)
         {
             s.spinId = spin.id;
-            const slice = (Math.PI * 2) / SPIN_REWARDS.length;
-            const nudge = (((spin.id * 7919) % 100) / 100 - 0.5) * slice * 0.6;
-            const from = s.wheel.rotation;
-            let to = -spin.rewardId * slice + nudge;
-            while (to < from + SPIN_TURNS * Math.PI * 2) to += Math.PI * 2;
-            s.spinFrom = from;
-            s.spinTo = to;
+            s.spinFrom = s.wheel.rotation;
+            s.spinTo = spinTarget(s.spinFrom, spin.rewardId, SPIN_REWARDS.length, spin.id);
         }
         const t = Math.min(1, spin.elapsedMs / this.settings.spinMs);
-        const eased = 1 - Math.pow(1 - t, 4);
-        s.wheel.rotation = s.spinFrom + (s.spinTo - s.spinFrom) * eased;
+        s.wheel.rotation = spinRotation(s.spinFrom, s.spinTo, t);
         keepLabelsUpright(s.wheel);
         // The slice passing under the pointer (the panel names it while the wheel spins).
-        const slice = (Math.PI * 2) / SPIN_REWARDS.length;
-        const n = SPIN_REWARDS.length;
-        s.underPointer = t >= 1 ? spin.rewardId : ((Math.round(-s.wheel.rotation / slice) % n) + n) % n;
+        s.underPointer = t >= 1 ? spin.rewardId : sliceUnderPointer(s.wheel.rotation, SPIN_REWARDS.length);
 
         if (t >= 1 && s.landedId !== spin.id)
         {
@@ -429,71 +424,6 @@ function sliceColor (rewardId: number): number
     if (!r) return TEXT_COLOR;
     if (r.count < 0) return LOSS_COLOR;
     return r.role === 'random' ? RARE_COLOR : ROLE_COLORS[r.role ?? 'warrior'];
-}
-
-/** The slice numbers stay upright while the wheel turns (pixel text reads badly rotated). */
-function keepLabelsUpright (wheel: GameObjects.Container): void
-{
-    const list = wheel.list;
-    for (let i = 1; i < list.length; i++) (list[i] as GameObjects.BitmapText).rotation = -wheel.rotation;
-}
-
-/** The wheel: one slice per reward (coloured by class), each with its amount. */
-function buildWheel (scene: Scene): GameObjects.Container
-{
-    const n = SPIN_REWARDS.length;
-    const slice = (Math.PI * 2) / n;
-    const g = scene.add.graphics();
-    // Rim and shadow.
-    g.fillStyle(0x000000, 0.45);
-    g.fillCircle(1, 2, WHEEL_RADIUS + 3);
-    g.fillStyle(0x3a2a18, 1);
-    g.fillCircle(0, 0, WHEEL_RADIUS + 3);
-    const labels: GameObjects.BitmapText[] = [];
-    SPIN_REWARDS.forEach((r, k) => {
-        // Slice k is centred on the top (-90°) at rotation 0, then clockwise.
-        const mid = -Math.PI / 2 + k * slice;
-        const color = r.count < 0 ? LOSS_SLICE : r.role === 'random' ? RARE_COLOR : ROLE_COLORS[r.role ?? 'warrior'];
-        g.fillStyle(color, 1);
-        g.slice(0, 0, WHEEL_RADIUS, mid - slice / 2, mid + slice / 2, false);
-        g.fillPath();
-        // A darker edge between slices.
-        g.lineStyle(1, 0x1a120a, 0.9);
-        g.lineBetween(0, 0, Math.cos(mid - slice / 2) * WHEEL_RADIUS, Math.sin(mid - slice / 2) * WHEEL_RADIUS);
-
-        const text = `${r.count}`;
-        const at = WHEEL_RADIUS * 0.64;
-        const label = scene.add.bitmapText(Math.cos(mid) * at, Math.sin(mid) * at, PIXEL_FONT, text)
-            .setOrigin(0.5, 0.5)
-            .setTint(r.count < 0 ? LOSS_COLOR : 0x1a120a);
-        labels.push(label);
-    });
-    // Gold rim studs and the hub.
-    for (let k = 0; k < n; k++)
-    {
-        const a = -Math.PI / 2 + (k + 0.5) * slice;
-        g.fillStyle(READY_ACCENT, 1);
-        g.fillRect(Math.round(Math.cos(a) * (WHEEL_RADIUS + 1.5)) - 1, Math.round(Math.sin(a) * (WHEEL_RADIUS + 1.5)) - 1, 2, 2);
-    }
-    g.fillStyle(0x3a2a18, 1);
-    g.fillCircle(0, 0, 5);
-    g.fillStyle(READY_ACCENT, 1);
-    g.fillCircle(0, 0, 3);
-    return scene.add.container(0, 0, [g, ...labels]);
-}
-
-/** The wheel and its fixed pointer at the top, in one holder. */
-function buildWheelHolder (scene: Scene, x: number, y: number): { wheel: GameObjects.Container; holder: GameObjects.Container }
-{
-    const wheel = buildWheel(scene);
-    const top = -WHEEL_RADIUS - 6;
-    const pointer = scene.add.graphics();
-    pointer.fillStyle(0x1a120a, 1);
-    pointer.fillTriangle(-6, top - 1, 6, top - 1, 0, top + 10);
-    pointer.fillStyle(0xf8f0d8, 1);
-    pointer.fillTriangle(-4, top, 4, top, 0, top + 7);
-    const holder = scene.add.container(x, y, [wheel, pointer]).setDepth(WHEEL_DEPTH).setVisible(false);
-    return { wheel, holder };
 }
 
 function colorsOf (p: Player): { main: string; dark: string }

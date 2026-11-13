@@ -705,6 +705,25 @@ function createGroundTileset (scene: Scene, size: number): void
     speckle(GroundTile.SwampCanopy, '#232a1a', [['#2c3420', 0.2]]);
     for (let i = 0; i < 6; i++) leafClump(GroundTile.SwampCanopy, rng() * size, rng() * size, 2 + Math.floor(rng() * 2), i % 2 ? '#4e5e32' : '#485040', i % 2 ? '#6a7c44' : '#626c58');
 
+    // --- Crystal biome ---
+    // Deep blue-violet moss glinting with crystal grit.
+    speckle(GroundTile.CrystalMoss, '#2a3358', [['#323d66', 0.18], ['#232b4a', 0.14], ['#7fd4ff', 0.006], ['#c79bff', 0.006]]);
+    speckle(GroundTile.CrystalMossAlt, '#2c3050', [['#36395e', 0.16], ['#22263f', 0.18], ['#8dffb5', 0.005]]);
+    tufts(GroundTile.CrystalMossAlt, 3, '#5a6aa8', '#22263f');
+    speckle(GroundTile.CrystalGlow, '#2a3358', [['#323d66', 0.16], ['#232b4a', 0.12]]);
+    for (let i = 0; i < 3; i++)
+    {
+        const x = rng() * size;
+        const y = rng() * size;
+        const glint = ['#7fd4ff', '#c79bff', '#8dffb5'][i % 3];
+        px(GroundTile.CrystalGlow, x, y, glint);
+        px(GroundTile.CrystalGlow, x, y + 1, '#e8f6ff');
+        px(GroundTile.CrystalGlow, x + 1, y + 1, glint);
+    }
+    // Crystal canopy at the map edge: dark blue rock with crystal tips.
+    speckle(GroundTile.CrystalCanopy, '#181c33', [['#20253f', 0.2]]);
+    for (let i = 0; i < 6; i++) leafClump(GroundTile.CrystalCanopy, rng() * size, rng() * size, 2, i % 3 === 0 ? '#3c5c8c' : i % 3 === 1 ? '#5a3f8c' : '#2f7a64', i % 3 === 0 ? '#7fd4ff' : i % 3 === 1 ? '#c79bff' : '#8dffb5');
+
     texture.refresh();
 }
 

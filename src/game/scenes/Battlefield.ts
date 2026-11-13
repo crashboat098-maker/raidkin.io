@@ -11,6 +11,7 @@ import { netClient } from '../net/NetClient';
 import { NetWorld } from '../net/NetWorld';
 import { addVignette, buildBattlefieldView, fitVignette } from '../render/BattlefieldView';
 import { ZoomController } from '../render/CameraZoom';
+import { ArenaView } from '../render/ArenaView';
 import { CastleView } from '../render/CastleView';
 import { CombatEffects } from '../render/CombatEffects';
 import { leaderId, rankPlayers } from '../logic/Leaderboard';
@@ -72,6 +73,9 @@ export class Battlefield extends Scene
     private culler: ViewCuller;
     private shardView: SoulShardView;
     private castleView: CastleView;
+    private arenaView: ArenaView | null = null;
+    /** The latest arena result, announced on everyone's screen for a few seconds. */
+    private arenaNotice: { text: string; until: number } | null = null;
     private controls: KeyboardControls;
     /** What the camera is following (the human army's steering point). */
     private cameraTarget: Vec2 | null = null;
@@ -125,6 +129,8 @@ export class Battlefield extends Scene
         this.culler = new ViewCuller(this, this.children.list.slice(sceneryFrom), layout.worldWidth, layout.worldHeight);
         // Castle circles, banners and panels (made after the culler: they're never culled).
         this.castleView = new CastleView(this, this.world.castles, GameConfig.castles);
+        this.arenaView = this.world.arena ? new ArenaView(this, this.world.arena, GameConfig.arena) : null;
+        this.arenaNotice = null;
         this.shardView = new SoulShardView(this, this.world.shards.shards);
         this.fallenView = new FallenView(this);
         this.neutralView = new NeutralView(this, this.world.neutrals.units);
@@ -178,8 +184,8 @@ export class Battlefield extends Scene
                 return { army, view: { x: v.x, y: v.y, width: v.width, height: v.height } };
             },
             getNotice: () => {
-                if (!this.net?.reconnecting) return null;
-                return `CONNECTION LOST - RECONNECTING ${this.net.rejoinSecondsLeft()}`;
+                if (this.net?.reconnecting) return `CONNECTION LOST - RECONNECTING ${this.net.rejoinSecondsLeft()}`;
+                return this.arenaStatusNotice();
             },
             playerColor: this.settings.color,
             recruitCost: GameConfig.army.recruitCost,
@@ -281,11 +287,25 @@ export class Battlefield extends Scene
             this.fallenView.remove(body);
             this.addSoldier(warrior, owner, Palette.accent.purple);
         }
-        // An unlucky castle spin: those soldiers vanish in a red puff.
-        for (const w of events.castleLosses ?? [])
+        // Soldiers lost to an unlucky spin (or a lost arena duel) vanish in a red puff.
+        for (const w of events.soldiersLost ?? [])
         {
             this.armyView.release(w);
             playJoinEffect(this, w.position.x, w.position.y, LOSS_PUFF);
+        }
+        // An arena duel ended: a burst over the arena, and a notice on everyone's screen.
+        if (events.arenaFinished && world.arena)
+        {
+            const { winner } = events.arenaFinished;
+            const c = world.arena.site.center;
+            const color = winner ? (Palette.armies[winner.colorId as keyof typeof Palette.armies]?.main ?? Palette.accent.purple) : Palette.accent.purple;
+            for (let k = 0; k < 10; k++)
+            {
+                const a = (k / 10) * Math.PI * 2;
+                playJoinEffect(this, c.x + Math.cos(a) * 60, c.y + Math.sin(a) * 60, color);
+            }
+            const text = winner ? `${winner.name} WINS THE ARENA!` : 'ARENA DUEL: NO WINNER';
+            this.arenaNotice = { text, until: time + 5000 };
         }
         for (const { player, warriors } of events.respawned)
         {
@@ -322,6 +342,7 @@ export class Battlefield extends Scene
                 playJoinEffect(this, c.site.x + Math.cos(a) * c.site.radius * 0.5, c.site.y + Math.sin(a) * c.site.radius * 0.5, hex);
             }
         });
+        if (this.arenaView && world.arena) this.arenaView.sync(world.arena, time, camera.worldView);
         this.culler.update(camera.worldView);
         // Structures/trees turn see-through only for YOUR soldiers (enemies behind cover stay hidden).
         this.seeThrough.update(human.respawnAt === null ? allWarriors(human.army).map((w) => w.position) : []);
@@ -339,6 +360,25 @@ export class Battlefield extends Scene
                 this.scene.launch('Defeat', data);
             });
         }
+    }
+
+    /**
+     * The arena line on the HUD: the 3-2-1 and wheel results for the two
+     * contestants, otherwise the latest result for a few seconds (for everyone).
+     */
+    private arenaStatusNotice (): string | null
+    {
+        const a = this.world.arena;
+        const me = this.world.human;
+        const zone = a?.zones.findIndex((z) => z.holder === me) ?? -1;
+        if (a && zone >= 0)
+        {
+            if (a.phase === 'countdown') return `ARENA DUEL IN ${Math.max(1, Math.ceil((GameConfig.arena.countdownMs - a.phaseMs) / 1000))}`;
+            if (a.phase === 'spinning') return 'SPIN THE WHEEL!';
+            if (a.phase === 'fight' && a.phaseMs < 1500) return 'FIGHT!';
+        }
+        if (this.arenaNotice && this.time.now < this.arenaNotice.until) return this.arenaNotice.text;
+        return null;
     }
 
     /** Show a soldier in its army's colour: a Warrior, a Guardian, or an Archer (with its bow-draw frame). */

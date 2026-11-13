@@ -7,7 +7,7 @@ import { volcanoInfluence, type VolcanoLayout } from './Volcano';
  * is a biome region:
  *   top-left     enchanted forest   (fully built)
  *   top-right    volcanic wastes    (the existing volcano, its ash spreading into the corner)
- *   bottom-left  not built yet      (ordinary wilderness for now)
+ *   bottom-left  crystal biome      (giant glowing crystals, the 1v1 arena)
  *   bottom-right swamp              (murky pools, stilt-hut villages, mist)
  *
  * A region is a wobbly quarter-disc around its world corner. It never
@@ -15,7 +15,7 @@ import { volcanoInfluence, type VolcanoLayout } from './Volcano';
  * exactly as it was. Pure logic.
  */
 
-export type BiomeKind = 'enchanted' | 'volcanic' | 'swamp' | 'unbuilt';
+export type BiomeKind = 'enchanted' | 'volcanic' | 'swamp' | 'crystal';
 export type Corner = 'topLeft' | 'topRight' | 'bottomLeft' | 'bottomRight';
 
 export interface BiomeRegion {
@@ -44,7 +44,7 @@ export function createBiomeMap (worldWidth: number, worldHeight: number, core: R
         regions: [
             region('enchanted', 'topLeft', 0, 0),
             region('volcanic', 'topRight', worldWidth, 0),
-            region('unbuilt', 'bottomLeft', 0, worldHeight),
+            region('crystal', 'bottomLeft', 0, worldHeight),
             region('swamp', 'bottomRight', worldWidth, worldHeight),
         ],
     };
@@ -105,4 +105,10 @@ export function swampAt (biomes: BiomeMap | null | undefined, x: number, y: numb
 export function volcanicAt (biomes: BiomeMap | null | undefined, volcano: VolcanoLayout | null | undefined, x: number, y: number): number
 {
     return Math.max(volcanoInfluence(volcano, x, y), regionInfluence(biomes, regionOf(biomes, 'volcanic'), x, y));
+}
+
+/** Crystal-biome strength at a spot. */
+export function crystalAt (biomes: BiomeMap | null | undefined, x: number, y: number): number
+{
+    return regionInfluence(biomes, regionOf(biomes, 'crystal'), x, y);
 }

@@ -53,7 +53,7 @@ export const GameConfig = {
         /**
          * The map above (120 x 120 tiles) is the preserved centre. The world is
          * this many tiles bigger on every side, and its four corners are biomes
-         * (enchanted forest top-left, volcano top-right; the bottom two are not built yet).
+         * (enchanted forest top-left, volcano top-right, crystal bottom-left, swamp bottom-right).
          */
         expandTiles: 28,
         /** How far each corner biome reaches from its corner (world px). */
@@ -252,6 +252,26 @@ export const GameConfig = {
         checkIntervalMs: 100,
     },
 
+    /**
+     * The 1v1 arena in the crystal biome. Hold an entry zone alone for
+     * `qualifyMs`; with both zones qualified: a 3-2-1 countdown, a Lucky Wheel
+     * each (+/-10, 20, 30 soldiers), then the gates open and the armies fight.
+     */
+    arena: {
+        qualifyMs: 10_000,
+        countdownMs: 3000,
+        spinMs: 2600,
+        /** The wheel results stay up this long before the gates open. */
+        resultMs: 1500,
+        /** A fight still going after this long ends: the bigger army wins (no endless stand-offs). */
+        maxFightMs: 180_000,
+        /** The winner is announced for this long, then walks out. */
+        victoryMs: 3500,
+        /** Then the arena rests this long before it opens again. */
+        cooldownMs: 15_000,
+        checkIntervalMs: 100,
+    },
+
     bots: {
         /** AI opponents that play like the human: 1 human + 3 bots = 4 competitors. */
         count: 3,
@@ -298,6 +318,14 @@ export const GameConfig = {
         castleMinSize: 6,
         /** ...within this distance of their army (world px). */
         castleSearchRadius: 1500,
+
+        // --- Arena ---
+        /** Armies this big queue for the arena within this distance of it... */
+        arenaMinSize: 8,
+        arenaSearchRadius: 1600,
+        /** ...wait this long in a zone for an opponent, then leave the arena be for a while (ms). */
+        arenaWaitMs: 60_000,
+        arenaIgnoreMs: 90_000,
 
         /** New armies spawn at least this far from any other army (no spawn camping). */
         spawnClearance: 360,

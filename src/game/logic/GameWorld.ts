@@ -1,4 +1,5 @@
 import type { BattlefieldLayout } from './BattlefieldLayout';
+import type { ArenaStatus } from './Arena';
 import type { CastleStatus } from './Castles';
 import type { SteerInput } from './Navigation';
 import type { NeutralWarrior } from './Neutrals';
@@ -23,6 +24,8 @@ export interface GameWorld {
     readonly shards: { readonly shards: readonly SoulShard[] };
     /** The Lucky Spin castles (ready or cooling down, and their latest spin). */
     readonly castles: readonly CastleStatus[];
+    /** The crystal biome's 1v1 arena (null on maps without one). */
+    readonly arena: ArenaStatus | null;
     readonly matchStartedAt: number | null;
     readonly humanDefeated: boolean;
 

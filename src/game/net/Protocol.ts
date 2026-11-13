@@ -1,4 +1,5 @@
 import type { SoldierRole, Warrior } from '../logic/Army';
+import type { ArenaPhase, ArenaStatus } from '../logic/Arena';
 import type { CastleStatus } from '../logic/Castles';
 import type { FallenBody } from '../logic/Fallen';
 import type { NeutralKind, NeutralWarrior } from '../logic/Neutrals';
@@ -18,7 +19,7 @@ import type { Vec2 } from '../logic/Types';
  */
 
 /** Bump when the messages change, so old pages are told to reload. */
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
 
 // ---------------------------------------------------------------------------
 // Browser -> server
@@ -86,6 +87,8 @@ export interface SnapshotMessage {
     events: EventRows;
     /** Every castle's state (always all three: it's tiny). */
     castles: CastleRow[];
+    /** The arena's state (null on maps without one). */
+    arena: ArenaRow | null;
 }
 
 /**
@@ -108,6 +111,25 @@ export function castleRow (c: CastleStatus, netOf: (p: Player) => number): Castl
         s ? s.id : -1, s?.player ? netOf(s.player) : -1, s ? s.rewardId : 0, s ? CASTLE_ROLES.indexOf(s.role) : 0, s ? Math.round(s.elapsedMs) : 0,
         c.charger ? netOf(c.charger) : -1, Math.round(c.chargedMs), c.contested ? 1 : 0,
     ];
+}
+
+/**
+ * [phase (ARENA_PHASES index), ms in phase, match id, winner net (-1 none),
+ *  then per zone: holder net (-1 none), ms held, flags (1 qualified, 2 contested), wheel outcome (-1 none)]
+ * The server alone runs the arena; browsers only show it.
+ */
+export type ArenaRow = number[];
+
+export const ARENA_PHASES: readonly ArenaPhase[] = ['open', 'countdown', 'spinning', 'fight', 'victory', 'cooldown'];
+
+export function arenaRow (a: ArenaStatus, netOf: (p: Player) => number): ArenaRow
+{
+    const row = [ARENA_PHASES.indexOf(a.phase), Math.round(a.phaseMs), a.matchId, a.winner ? netOf(a.winner) : -1];
+    for (const z of a.zones)
+    {
+        row.push(z.holder ? netOf(z.holder) : -1, Math.round(z.heldMs), (z.qualified ? 1 : 0) | (z.contested ? 2 : 0), z.outcome ?? -1);
+    }
+    return row;
 }
 
 export interface SnapPlayer {
@@ -234,7 +256,7 @@ export function rosterRow (net: number, p: Player): RosterRow
 // Binary snapshots
 //
 // Layout (little-endian):
-//   u8 marker (SNAPSHOT_MARKER), u32 time, u32 tail length, tail (UTF-8 JSON {you, events, castles}),
+//   u8 marker (SNAPSHOT_MARKER), u32 time, u32 tail length, tail (UTF-8 JSON {you, events, castles, arena}),
 //   u16 players, per player:
 //     u16 net, u8 alive, u16 leadX, u16 leadY, i8 headingX, i8 headingY, i32 rep, u32 size,
 //     u32 soldiers sent, per soldier: u32 id, u16 x, u16 y, u16 hp, u8 flags   (11 bytes)
@@ -264,10 +286,10 @@ const decoder = new TextDecoder();
 
 export function encodeSnapshot (
     time: number, you: YouRow | null, events: EventRows,
-    armies: readonly SnapshotArmy[], neutrals: readonly NeutralWarrior[], now: number, castles: readonly CastleRow[] = [],
+    armies: readonly SnapshotArmy[], neutrals: readonly NeutralWarrior[], now: number, castles: readonly CastleRow[] = [], arena: ArenaRow | null = null,
 ): Uint8Array
 {
-    const tail = encoder.encode(JSON.stringify({ you, events, castles }));
+    const tail = encoder.encode(JSON.stringify({ you, events, castles, arena }));
     let size = 1 + 4 + 4 + tail.length + 2 + 4 + neutrals.length * NEUTRAL_BYTES;
     for (const a of armies) size += PLAYER_BYTES + a.warriors.length * SOLDIER_BYTES;
 
@@ -331,7 +353,7 @@ export function decodeSnapshot (buffer: ArrayBuffer): SnapshotMessage | null
         o += 1;
         const time = v.getUint32(o, true); o += 4;
         const tailLength = v.getUint32(o, true); o += 4;
-        const tail = JSON.parse(decoder.decode(new Uint8Array(buffer, o, tailLength))) as { you: YouRow | null; events: EventRows; castles?: CastleRow[] };
+        const tail = JSON.parse(decoder.decode(new Uint8Array(buffer, o, tailLength))) as { you: YouRow | null; events: EventRows; castles?: CastleRow[]; arena?: ArenaRow | null };
         o += tailLength;
 
         const players: SnapPlayer[] = [];
@@ -370,7 +392,7 @@ export function decodeSnapshot (buffer: ArrayBuffer): SnapshotMessage | null
             neutrals[k * 5 + 4] = v.getUint8(o + 9);
             o += NEUTRAL_BYTES;
         }
-        return { t: 'snap', time, you: tail.you, players, neutrals, events: tail.events, castles: tail.castles ?? [] };
+        return { t: 'snap', time, you: tail.you, players, neutrals, events: tail.events, castles: tail.castles ?? [], arena: tail.arena ?? null };
     }
     catch
     {

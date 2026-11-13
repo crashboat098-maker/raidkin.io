@@ -45,6 +45,8 @@ export const NatureTex = {
     Lantern: 'lantern',
     FaeStatue: 'fae-statue',
     crystalCluster: (variant: number) => `crystal-cluster-${variant}`,
+    giantCrystal: (variant: number) => `giant-crystal-${variant}`,
+    crystalShard: (variant: number) => `crystal-shard-${variant}`,
     goldenOak: (variant: number) => `golden-oak-${variant}`,
     cypress: (variant: number) => `cypress-${variant}`,
     twistedYew: (variant: number) => `twisted-yew-${variant}`,
@@ -168,6 +170,10 @@ export function createNatureTextures (scene: Scene): void
     for (let v = 0; v < 2; v++) paint(scene, NatureTex.twistedYew(v), 32, 38, 1320 + v, (p) => paintTwistedYew(p, v));
     paint(scene, NatureTex.FaeStatue, 12, 24, 1330, paintFaeStatue);
     for (let v = 0; v < 2; v++) paint(scene, NatureTex.crystalCluster(v), 14, 16, 1340 + v, (p) => paintCrystals(p, v));
+
+    // --- Crystal biome ---
+    for (let v = 0; v < 6; v++) paint(scene, NatureTex.giantCrystal(v), 26, 44, 1900 + v, (p) => paintGiantCrystal(p, v));
+    for (let v = 0; v < 3; v++) paint(scene, NatureTex.crystalShard(v), 10, 10, 1910 + v, (p) => paintCrystalShard(p, v));
     for (let v = 0; v < 3; v++) paint(scene, NatureTex.pebbles(v), 14, 6, 1350 + v, (p) => paintPebbles(p));
     for (let v = 0; v < 2; v++) paint(scene, NatureTex.ashShrub(v), 14, 9, 1360 + v, (p) => paintAshShrub(p, v));
     for (let v = 0; v < 2; v++) paint(scene, NatureTex.obsidian(v), 14, 12, 1370 + v, (p) => paintObsidian(p, v));
@@ -337,6 +343,64 @@ function paintCrystals (p: PixelPainter, variant: number): void
     shard(3, 5, 2);
     shard(11, 6, 1);
     p.rect(1, 14, 12, 2, c[3]);
+}
+
+/** Crystal hues, light to dark: blue, violet, green. */
+const CRYSTAL_SHADES = [
+    ['#e8f8ff', '#9fe0ff', '#4fa8e0', '#2a5f9a', '#1a3460'],
+    ['#f4ebff', '#d6b4ff', '#9a68e0', '#6a3fae', '#3a2266'],
+    ['#eafff2', '#a8ffc8', '#4fd88c', '#2a8a5a', '#174a32'],
+] as const;
+
+/**
+ * 26 x 44: a towering crystal of the crystal biome (variant % 3: blue, violet,
+ * green; variants 3-5 a twin-spire shape), its facets lit from the upper left.
+ */
+function paintGiantCrystal (p: PixelPainter, variant: number): void
+{
+    const c = CRYSTAL_SHADES[variant % 3];
+    const spire = (cx: number, top: number, half: number, bottom: number) => {
+        for (let y = top; y <= bottom; y++)
+        {
+            const w = Math.min(half, Math.floor((y - top) * 0.55) + 1);
+            for (let dx = -w; dx <= w; dx++)
+            {
+                const shade = dx < -w / 2 ? c[0] : dx < 0 ? c[1] : dx === 0 ? c[2] : dx < w / 2 ? c[3] : c[4];
+                p.set(cx + dx, y, shade);
+            }
+        }
+        // A bright glint near the tip.
+        p.set(cx - 1, top + 3, '#ffffff');
+        p.set(cx - 1, top + 4, c[0]);
+    };
+    if (variant < 3)
+    {
+        spire(13, 0, 6, 41);
+        spire(6, 16, 4, 41);
+        spire(20, 22, 3, 41);
+    }
+    else
+    {
+        spire(9, 2, 5, 41);
+        spire(17, 8, 5, 41);
+        spire(4, 26, 2, 41);
+    }
+    // Rocky base it grows from.
+    p.rect(2, 40, 22, 3, '#262a40');
+    p.speckle(2, 40, 22, 3, '#3a3f5c', 0.4);
+}
+
+/** 10 x 10: a little crystal shard poking out of the moss (blue, violet, green). */
+function paintCrystalShard (p: PixelPainter, variant: number): void
+{
+    const c = CRYSTAL_SHADES[variant % 3];
+    for (let y = 1; y < 9; y++)
+    {
+        const w = Math.min(2, Math.floor((y - 1) / 2));
+        for (let dx = -w; dx <= w; dx++) p.set(5 + dx, y, dx < 0 ? c[0] : dx === 0 ? c[1] : c[3]);
+    }
+    for (let y = 5; y < 9; y++) { p.set(2, y, c[1]); p.set(2 + (y > 6 ? 1 : 0), y, c[2]); }
+    p.rect(1, 9, 8, 1, '#262a40');
 }
 
 /** 14 x 6: smooth river pebbles on the sand. */
