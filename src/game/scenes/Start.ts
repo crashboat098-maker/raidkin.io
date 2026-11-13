@@ -7,6 +7,7 @@ import { ensurePixelFont, PIXEL_FONT } from '../render/PixelFont';
 import { createPlaceholderTextures, Tex } from '../render/PlaceholderArt';
 import { CRYSTAL_GLOWS, createTitleTextures, TitleTex, VOLCANO } from '../render/TitleArt';
 import { BUTTON_PRIMARY, PixelButton } from '../render/UiKit';
+import { Music, playMusic, stopMusic } from '../render/Music';
 import { netClient } from '../net/NetClient';
 import { isNameChar, loadSettings, NAME_MAX_LENGTH, sanitizeName, saveSettings, type PlayerSettings } from './PlayerSettings';
 
@@ -96,6 +97,8 @@ export class Start extends Scene
 
         this.drawWorld();
         this.drawLogo();
+        // The start screen's theme (it waits for the first tap or key if the browser insists).
+        playMusic(this, Music.start);
 
         // --- The panel ---
         const g = this.add.graphics();
@@ -215,6 +218,8 @@ export class Start extends Scene
     {
         this.settings.name = sanitizeName(this.typedName);
         saveSettings(this.settings);
+        // The battlefield gets its own music: fade the start theme out.
+        stopMusic(700);
         this.scene.start('Battlefield', { ...this.settings });
     }
 
