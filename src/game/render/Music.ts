@@ -12,11 +12,13 @@ export interface MusicTrack {
     /** OGG first (smaller), MP3 for browsers without OGG (Safari). */
     urls: string[];
     volume: number;
+    /** Where the track starts the first time (seconds); loops go back to the very start. */
+    startAt?: number;
 }
 
 export const Music = {
     /** "4 DFM" from the Dark Fantasy Music Pack Vol.1: the start screen. */
-    start: { key: 'music-start', urls: ['assets/music/start-theme.ogg', 'assets/music/start-theme.mp3'], volume: 0.45 },
+    start: { key: 'music-start', urls: ['assets/music/start-theme.ogg', 'assets/music/start-theme.mp3'], volume: 0.45, startAt: 10 },
 } satisfies Record<string, MusicTrack>;
 
 const FADE_STEP_MS = 50;
@@ -35,7 +37,7 @@ export function playMusic (scene: Scene, track: MusicTrack, fadeInMs = 1500): vo
         if (currentKey !== track.key) return; // something else was asked for meanwhile
         const sound = scene.sound.add(track.key, { loop: true, volume: 0 });
         current = sound;
-        const begin = () => { if (current === sound) { sound.play(); ramp(sound, 0, track.volume, fadeInMs); } };
+        const begin = () => { if (current === sound) { sound.play({ seek: track.startAt ?? 0 }); ramp(sound, 0, track.volume, fadeInMs); } };
         if (scene.sound.locked) scene.sound.once('unlocked', begin);
         else begin();
     };
