@@ -1,5 +1,6 @@
 import { GameObjects, Scene } from 'phaser';
-import type { CastleSettings, CastleStatus } from '../logic/Castles';
+import type { SoldierRole } from '../logic/Army';
+import { SPIN_REWARDS, type CastleSettings, type CastleStatus } from '../logic/Castles';
 import type { Player } from '../logic/Player';
 import { Depth } from './BattlefieldView';
 import { hexToInt, Palette, type ArmyColor } from './Palette';
@@ -7,18 +8,19 @@ import { PIXEL_FONT } from './PixelFont';
 import { Tex } from './PlaceholderArt';
 
 /**
- * Draws the three castles' capture circles, banners and info panels.
+ * Draws the three Lucky Spin castles: the circle, banners, an info panel,
+ * and the reward wheel over the castle's front.
  *
  * The circle is a ring of small square "pixels" on the ground (under the
  * soldiers), so it reads as part of the pixel-art world:
- *   neutral   subtle white/gold
- *   capturing fills clockwise from the top in the capturing army's colour
- *   contested flashes red, progress paused
- *   owned     the owner's colour (banners too)
+ *   ready     gold rhythm (step in to spin)
+ *   spinning  the spinner's colour
  *   cooldown  muted grey, lighting back up as the cooldown runs out
  *
- * Nothing is redrawn unless what it shows changed (a dot filled, a second
- * ticked, the colour changed), so a castle costs next to nothing per frame.
+ * The wheel turns slowly while the castle is ready, spins to the result the
+ * World (online: the server) already picked, then shows it for a moment. It
+ * is hidden while the castle is recharging. Nothing is redrawn unless what it
+ * shows changed, so a castle costs next to nothing per frame.
  */
 
 /** Spacing of the ring's dots along the circle (world px). */
@@ -26,16 +28,30 @@ const DOT_SPACING = 6;
 const DOT_SIZE = 2;
 /** On the ground: above trails and baked scenery, below every standing thing. */
 const RING_DEPTH = Depth.FlatDecorations + 0.5;
-/** Panels sit with the army name tags, above the fighting. */
+/** Panels and wheels sit with the army name tags, above the fighting. */
 const PANEL_DEPTH = 849_000;
-const FLASH_MS = 260;
+/** The wheel floats above everything on the battlefield, army names and crown included. */
+const WHEEL_DEPTH = 850_100;
 
-const NEUTRAL_COLOR = 0xe8d8a0;
-const NEUTRAL_ACCENT = 0xf0c860;
-const CONTESTED_COLOR = 0xd8432f;
+const READY_COLOR = 0xe8d8a0;
+const READY_ACCENT = 0xf0c860;
 const MUTED_COLOR = 0x6a6a60;
 const NAME_COLOR = 0xf0c860;
 const TEXT_COLOR = 0xe8e0c8;
+const LOSS_COLOR = 0xd8432f;
+
+/** Wheel radius (world px) and how far above the castle's front (its gate) it sits. */
+const WHEEL_RADIUS = 30;
+const WHEEL_LIFT = 16;
+/** Full turns the wheel makes before it settles on the result. */
+const SPIN_TURNS = 5;
+/** Idle turning speed while ready (radians per second). */
+const IDLE_SPEED = 0.35;
+
+const ROLE_COLORS: Record<SoldierRole, number> = { warrior: 0xc8503c, archer: 0x5aa848, guardian: 0x5a7ec8 };
+const ROLE_NAME: Record<SoldierRole, string> = { warrior: 'WARRIORS', archer: 'ARCHERS', guardian: 'GUARDIANS' };
+const RARE_COLOR = 0xf0c860;
+const LOSS_SLICE = 0x2a1618;
 
 interface CastleSprites {
     ring: GameObjects.Graphics;
@@ -45,6 +61,19 @@ interface CastleSprites {
     panel: GameObjects.Graphics;
     lines: GameObjects.BitmapText[];
     panelKey: string;
+    wheel: GameObjects.Container;
+    /** Holds the wheel and its fixed pointer; slid to stay on screen. */
+    holder: GameObjects.Container;
+    home: { x: number; y: number };
+    /** The spin the wheel is showing, where it started turning from and where it ends. */
+    spinId: number;
+    spinFrom: number;
+    spinTo: number;
+    /** The slice under the pointer right now (SPIN_REWARDS index). */
+    underPointer: number;
+    /** The last spin whose landing was celebrated. */
+    landedId: number;
+    lastTime: number;
 }
 
 export class CastleView
@@ -57,6 +86,8 @@ export class CastleView
             const { front } = c.site;
             const banners = [-1, 1].map((side) =>
                 scene.add.image(front.x + side * 34, front.y + 8, Tex.CastleBannerNeutral).setOrigin(0.5, 1).setDepth(front.y + 8).setFlipX(side < 0));
+            const wx = front.x;
+            const wy = front.y - WHEEL_LIFT;
             return {
                 ring: scene.add.graphics().setDepth(RING_DEPTH),
                 ringKey: '',
@@ -65,74 +96,129 @@ export class CastleView
                 panel: scene.add.graphics().setDepth(PANEL_DEPTH),
                 lines: [0, 1, 2].map(() => scene.add.bitmapText(0, 0, PIXEL_FONT, '').setOrigin(0.5, 0).setDepth(PANEL_DEPTH + 1)),
                 panelKey: '',
+                ...buildWheelHolder(scene, wx, wy),
+                spinId: -1,
+                spinFrom: 0,
+                spinTo: 0,
+                underPointer: 0,
+                landedId: -1,
+                lastTime: 0,
             };
         });
     }
 
-    /** Bring every castle's look up to date. Call once per frame. */
-    sync (castles: readonly CastleStatus[], time: number, view: { x: number; y: number; right: number; bottom: number }): void
+    /**
+     * Bring every castle's look up to date. Call once per frame.
+     * `landed` is called once when a wheel stops (for the scene's effects).
+     */
+    sync (
+        castles: readonly CastleStatus[], time: number, view: { x: number; y: number; right: number; bottom: number },
+        landed?: (c: CastleStatus, color: number) => void,
+    ): void
     {
         castles.forEach((c, i) => {
             const s = this.sprites[i];
             if (!s) return;
+            const dt = s.lastTime ? Math.min(0.1, (time - s.lastTime) / 1000) : 0;
+            s.lastTime = time;
             const { site } = c;
             const reach = site.radius + 40;
             const onScreen = site.x + reach > view.x && site.x - reach < view.right && site.y + reach > view.y && site.y - reach - 220 < view.bottom;
             s.ring.setVisible(onScreen);
             s.panel.setVisible(onScreen);
             for (const line of s.lines) line.setVisible(onScreen);
+            this.turnWheel(c, s, dt, onScreen, landed);
             if (!onScreen) return;
-            this.drawRing(c, s, time);
+            this.placeWheel(s, view);
+            this.drawRing(c, s);
             this.drawBanners(c, s);
             this.drawPanel(c, s);
         });
     }
 
-    /** A castle was just taken: a burst of the new owner's colour over the circle. */
-    captured (c: CastleStatus, play: (x: number, y: number, color: string) => void): void
+    /**
+     * The wheel sits at the castle's gate, but slides in from the edge of the
+     * screen when the gate is out of view (e.g. you're deep in the circle), so
+     * a spin can always be watched. It keeps clear of the HUD bars.
+     */
+    private placeWheel (s: CastleSprites, view: { x: number; y: number; right: number; bottom: number }): void
     {
-        if (!c.owner) return;
-        const color = colorsOf(c.owner).main;
-        play(c.site.x, c.site.y, color);
-        for (let k = 0; k < 8; k++)
+        if (!s.holder.visible) return;
+        const h = view.bottom - view.y;
+        const edge = WHEEL_RADIUS + 10;
+        const minY = view.y + h * 0.1 + edge;
+        const maxY = Math.max(minY, view.bottom - h * 0.08 - edge);
+        const minX = view.x + edge;
+        const maxX = Math.max(minX, view.right - edge);
+        const x = Math.round(Math.min(maxX, Math.max(minX, s.home.x)));
+        const y = Math.round(Math.min(maxY, Math.max(minY, s.home.y)));
+        if (x !== s.holder.x || y !== s.holder.y) s.holder.setPosition(x, y);
+    }
+
+    private turnWheel (c: CastleStatus, s: CastleSprites, dt: number, onScreen: boolean, landed?: (c: CastleStatus, color: number) => void): void
+    {
+        const spin = c.spin;
+        const showing = onScreen && (spin !== null || c.state === 'ready');
+        s.holder.setVisible(showing);
+
+        if (!spin)
         {
-            const a = (k / 8) * Math.PI * 2;
-            play(c.site.x + Math.cos(a) * c.site.radius, c.site.y + Math.sin(a) * c.site.radius, color);
+            if (c.state === 'ready' && showing)
+            {
+                s.wheel.rotation = (s.wheel.rotation + IDLE_SPEED * dt) % (Math.PI * 2);
+                keepLabelsUpright(s.wheel);
+            }
+            return;
+        }
+
+        // A new spin: turn from where the wheel is to the slice the result is on
+        // (slice k sits under the top pointer at rotation -k * slice), plus a
+        // few full turns and a small, fixed nudge off the slice's centre.
+        if (s.spinId !== spin.id)
+        {
+            s.spinId = spin.id;
+            const slice = (Math.PI * 2) / SPIN_REWARDS.length;
+            const nudge = (((spin.id * 7919) % 100) / 100 - 0.5) * slice * 0.6;
+            const from = s.wheel.rotation;
+            let to = -spin.rewardId * slice + nudge;
+            while (to < from + SPIN_TURNS * Math.PI * 2) to += Math.PI * 2;
+            s.spinFrom = from;
+            s.spinTo = to;
+        }
+        const t = Math.min(1, spin.elapsedMs / this.settings.spinMs);
+        const eased = 1 - Math.pow(1 - t, 4);
+        s.wheel.rotation = s.spinFrom + (s.spinTo - s.spinFrom) * eased;
+        keepLabelsUpright(s.wheel);
+        // The slice passing under the pointer (the panel names it while the wheel spins).
+        const slice = (Math.PI * 2) / SPIN_REWARDS.length;
+        const n = SPIN_REWARDS.length;
+        s.underPointer = t >= 1 ? spin.rewardId : ((Math.round(-s.wheel.rotation / slice) % n) + n) % n;
+
+        if (t >= 1 && s.landedId !== spin.id)
+        {
+            s.landedId = spin.id;
+            s.wheel.rotation = s.spinTo % (Math.PI * 2);
+            s.spinFrom = s.spinTo = s.wheel.rotation;
+            // (Not for a spin that had long landed before we saw it, e.g. just after joining.)
+            if (onScreen && spin.elapsedMs < this.settings.spinMs + 500) landed?.(c, sliceColor(spin.rewardId));
         }
     }
 
-    private drawRing (c: CastleStatus, s: CastleSprites, time: number): void
+    private drawRing (c: CastleStatus, s: CastleSprites): void
     {
         const { x, y, radius } = c.site;
         const dots = Math.max(24, Math.round((Math.PI * 2 * radius) / DOT_SPACING));
-        const flashOn = c.contested && Math.floor(time / FLASH_MS) % 2 === 0;
 
         // What the ring shows: a base colour for every dot, and the first `filled` dots in `fill`.
-        let base = NEUTRAL_COLOR;
+        let base = READY_COLOR;
         let baseAlpha = 0.5;
-        let fill = NEUTRAL_COLOR;
+        let fill = READY_COLOR;
         let filled = 0;
         let area = 0;
-        if (c.state === 'neutral' && c.capturer)
+        const spinner = c.spin?.player ?? null;
+        if (spinner && c.spin && !c.spin.landed)
         {
-            base = NEUTRAL_COLOR;
-            baseAlpha = 0.3;
-            fill = hexToInt(colorsOf(c.capturer).main);
-            filled = Math.floor(c.progress * dots);
-            area = fill;
-        }
-        else if (c.state === 'owned' && c.owner && c.capturer)
-        {
-            // Being taken over: the challenger's colour eats into the owner's ring.
-            base = hexToInt(colorsOf(c.owner).main);
-            baseAlpha = 0.5;
-            fill = hexToInt(colorsOf(c.capturer).main);
-            filled = Math.floor(c.progress * dots);
-            area = fill;
-        }
-        else if (c.state === 'owned' && c.owner)
-        {
-            base = fill = hexToInt(colorsOf(c.owner).main);
+            base = fill = hexToInt(colorsOf(spinner).main);
             baseAlpha = 0.8;
             filled = dots;
             area = fill;
@@ -141,21 +227,20 @@ export class CastleView
         {
             base = MUTED_COLOR;
             baseAlpha = 0.45;
-            fill = NEUTRAL_COLOR;
+            fill = READY_COLOR;
             filled = Math.floor((1 - c.cooldownMs / this.settings.cooldownMs) * dots);
         }
-        if (flashOn) { base = CONTESTED_COLOR; baseAlpha = 0.85; }
 
-        const key = `${base}|${baseAlpha}|${fill}|${filled}|${flashOn}`;
+        const key = `${c.state}|${base}|${baseAlpha}|${fill}|${filled}`;
         if (key === s.ringKey) return;
         s.ringKey = key;
 
         const g = s.ring;
         g.clear();
-        // A faint wash inside the circle while someone is taking or holding it.
-        if (area || flashOn)
+        // A faint wash inside the circle while a wheel spins for someone.
+        if (area)
         {
-            g.fillStyle(flashOn ? CONTESTED_COLOR : area, flashOn ? 0.07 : 0.05);
+            g.fillStyle(area, 0.05);
             g.fillCircle(x, y, radius);
         }
         for (let k = 0; k < dots; k++)
@@ -167,9 +252,9 @@ export class CastleView
             const isFilled = k < filled;
             let color = isFilled ? fill : base;
             let alpha = isFilled ? 0.95 : baseAlpha;
-            // Neutral rings get a little gold rhythm so they read as "special ground".
-            if (!isFilled && c.state === 'neutral' && !c.capturer && !flashOn && k % 4 === 0) { color = NEUTRAL_ACCENT; alpha = 0.7; }
-            if (isFilled && c.state === 'cooldown') alpha = 0.55;
+            // Ready rings get a little gold rhythm so they read as "special ground".
+            if (!isFilled && c.state === 'ready' && k % 4 === 0) { color = READY_ACCENT; alpha = 0.7; }
+            if (isFilled && c.state === 'cooldown' && !area) alpha = 0.55;
             g.fillStyle(0x000000, alpha * 0.5);
             g.fillRect(px + 1, py + 1, DOT_SIZE, DOT_SIZE);
             g.fillStyle(color, alpha);
@@ -179,57 +264,50 @@ export class CastleView
 
     private drawBanners (c: CastleStatus, s: CastleSprites): void
     {
-        const holder = c.state !== 'neutral' ? c.owner : null;
-        const key = `${holder?.colorId ?? '-'}|${c.state}`;
+        const key = c.state;
         if (key === s.bannerKey) return;
         s.bannerKey = key;
-        const texture = holder ? Tex.banner(holder.colorId) : Tex.CastleBannerNeutral;
-        for (const banner of s.banners)
-        {
-            banner.setTexture(texture).setAlpha(c.state === 'cooldown' ? 0.6 : 1);
-        }
+        for (const banner of s.banners) banner.setAlpha(c.state === 'cooldown' ? 0.6 : 1);
     }
 
     private drawPanel (c: CastleStatus, s: CastleSprites): void
     {
-        const set = this.settings;
         const secs = (ms: number) => Math.max(0, Math.ceil(ms / 1000));
         let status = '';
         let statusColor = TEXT_COLOR;
         let detail = '';
         let detailColor = TEXT_COLOR;
+        let border = 0x7a6a48;
+        const spin = c.spin;
 
-        if (c.state === 'neutral')
+        if (spin && !spin.landed)
         {
-            if (c.contested) { status = 'CONTESTED'; statusColor = CONTESTED_COLOR; }
-            else if (c.capturer) { status = `${c.capturer.name} CAPTURING`; statusColor = hexToInt(colorsOf(c.capturer).main); }
-            else status = 'NEUTRAL';
-            detail = c.capturer
-                ? `${secs((1 - c.progress) * set.captureMs)}S LEFT`
-                : `HOLD ${secs(set.captureMs)}S TO CAPTURE`;
-            detailColor = c.contested ? CONTESTED_COLOR : TEXT_COLOR;
+            // Like a slot machine: whatever slice is passing the pointer.
+            const r = SPIN_REWARDS[s.underPointer];
+            status = r.role === 'random' ? `+${r.count} RANDOM` : r.label;
+            statusColor = sliceColor(s.underPointer);
+            const who = spin.player;
+            detail = `${who?.name ?? 'SOMEONE'} SPINS...`;
+            detailColor = who ? hexToInt(colorsOf(who).main) : TEXT_COLOR;
+            border = detailColor;
         }
-        else if (c.state === 'owned' && c.owner && c.capturer)
+        else if (spin)
         {
-            // An unguarded castle being taken over.
-            status = c.contested ? 'CONTESTED' : `${c.capturer.name} TAKING OVER`;
-            statusColor = c.contested ? CONTESTED_COLOR : hexToInt(colorsOf(c.capturer).main);
-            detail = `${secs((1 - c.progress) * set.captureMs)}S LEFT  OWNER ${c.owner.name}`;
-            detailColor = c.contested ? CONTESTED_COLOR : TEXT_COLOR;
+            status = rewardText(spin.rewardId, spin.role);
+            statusColor = sliceColor(spin.rewardId);
+            detail = spin.player ? `FOR ${spin.player.name}` : '';
+            border = statusColor;
         }
-        else if (c.state === 'owned' && c.owner)
+        else if (c.state === 'ready')
         {
-            status = `OWNER ${c.owner.name}`;
-            statusColor = hexToInt(colorsOf(c.owner).main);
-            const next = c.contested ? 'CONTESTED' : c.nextGuardianMs === null ? 'PAUSED' : `NEXT ${secs(c.nextGuardianMs)}S`;
-            detail = `GUARDIANS ${c.awarded}/${set.maxGuardians}  ${next}`;
-            detailColor = c.contested ? CONTESTED_COLOR : TEXT_COLOR;
+            status = 'LUCKY SPIN READY';
+            statusColor = NAME_COLOR;
+            detail = 'STEP IN TO SPIN';
         }
         else
         {
-            status = c.owner ? `HELD BY ${c.owner.name}` : 'RESTING';
-            statusColor = c.owner ? hexToInt(colorsOf(c.owner).main) : TEXT_COLOR;
-            detail = `COOLDOWN ${secs(c.cooldownMs)}S`;
+            status = 'RECHARGING';
+            detail = `READY IN ${secs(c.cooldownMs)}S`;
             detailColor = MUTED_COLOR + 0x303030;
         }
 
@@ -248,9 +326,92 @@ export class CastleView
         g.clear();
         g.fillStyle(0x0d0f0c, 0.72);
         g.fillRect(Math.round(c.site.x - width / 2), top, Math.round(width), 34);
-        g.lineStyle(1, c.state === 'owned' && c.owner ? hexToInt(colorsOf(c.owner).main) : 0x7a6a48, 0.9);
+        g.lineStyle(1, border, 0.9);
         g.strokeRect(Math.round(c.site.x - width / 2) + 0.5, top + 0.5, Math.round(width) - 1, 33);
     }
+}
+
+/** What a result says: "+15 ARCHERS", "+25 GUARDIANS", "LOSE 10 SOLDIERS". */
+function rewardText (rewardId: number, role: SoldierRole): string
+{
+    const r = SPIN_REWARDS[rewardId];
+    if (!r) return '';
+    return r.count < 0 ? `LOSE ${-r.count} SOLDIERS` : `+${r.count} ${ROLE_NAME[role]}`;
+}
+
+
+/** A slice's colour: its class, gold for the rare one, red for the loss (as text). */
+function sliceColor (rewardId: number): number
+{
+    const r = SPIN_REWARDS[rewardId];
+    if (!r) return TEXT_COLOR;
+    if (r.count < 0) return LOSS_COLOR;
+    return r.role === 'random' ? RARE_COLOR : ROLE_COLORS[r.role ?? 'warrior'];
+}
+
+/** The slice numbers stay upright while the wheel turns (pixel text reads badly rotated). */
+function keepLabelsUpright (wheel: GameObjects.Container): void
+{
+    const list = wheel.list;
+    for (let i = 1; i < list.length; i++) (list[i] as GameObjects.BitmapText).rotation = -wheel.rotation;
+}
+
+/** The wheel: one slice per reward (coloured by class), each with its amount. */
+function buildWheel (scene: Scene): GameObjects.Container
+{
+    const n = SPIN_REWARDS.length;
+    const slice = (Math.PI * 2) / n;
+    const g = scene.add.graphics();
+    // Rim and shadow.
+    g.fillStyle(0x000000, 0.45);
+    g.fillCircle(1, 2, WHEEL_RADIUS + 3);
+    g.fillStyle(0x3a2a18, 1);
+    g.fillCircle(0, 0, WHEEL_RADIUS + 3);
+    const labels: GameObjects.BitmapText[] = [];
+    SPIN_REWARDS.forEach((r, k) => {
+        // Slice k is centred on the top (-90°) at rotation 0, then clockwise.
+        const mid = -Math.PI / 2 + k * slice;
+        const color = r.count < 0 ? LOSS_SLICE : r.role === 'random' ? RARE_COLOR : ROLE_COLORS[r.role ?? 'warrior'];
+        g.fillStyle(color, 1);
+        g.slice(0, 0, WHEEL_RADIUS, mid - slice / 2, mid + slice / 2, false);
+        g.fillPath();
+        // A darker edge between slices.
+        g.lineStyle(1, 0x1a120a, 0.9);
+        g.lineBetween(0, 0, Math.cos(mid - slice / 2) * WHEEL_RADIUS, Math.sin(mid - slice / 2) * WHEEL_RADIUS);
+
+        const text = `${r.count}`;
+        const at = WHEEL_RADIUS * 0.64;
+        const label = scene.add.bitmapText(Math.cos(mid) * at, Math.sin(mid) * at, PIXEL_FONT, text)
+            .setOrigin(0.5, 0.5)
+            .setTint(r.count < 0 ? LOSS_COLOR : 0x1a120a);
+        labels.push(label);
+    });
+    // Gold rim studs and the hub.
+    for (let k = 0; k < n; k++)
+    {
+        const a = -Math.PI / 2 + (k + 0.5) * slice;
+        g.fillStyle(READY_ACCENT, 1);
+        g.fillRect(Math.round(Math.cos(a) * (WHEEL_RADIUS + 1.5)) - 1, Math.round(Math.sin(a) * (WHEEL_RADIUS + 1.5)) - 1, 2, 2);
+    }
+    g.fillStyle(0x3a2a18, 1);
+    g.fillCircle(0, 0, 5);
+    g.fillStyle(READY_ACCENT, 1);
+    g.fillCircle(0, 0, 3);
+    return scene.add.container(0, 0, [g, ...labels]);
+}
+
+/** The wheel and its fixed pointer at the top, in one holder that can be slid around. */
+function buildWheelHolder (scene: Scene, x: number, y: number): { wheel: GameObjects.Container; holder: GameObjects.Container; home: { x: number; y: number } }
+{
+    const wheel = buildWheel(scene);
+    const top = -WHEEL_RADIUS - 6;
+    const pointer = scene.add.graphics();
+    pointer.fillStyle(0x1a120a, 1);
+    pointer.fillTriangle(-6, top - 1, 6, top - 1, 0, top + 10);
+    pointer.fillStyle(0xf8f0d8, 1);
+    pointer.fillTriangle(-4, top, 4, top, 0, top + 7);
+    const holder = scene.add.container(x, y, [wheel, pointer]).setDepth(WHEEL_DEPTH).setVisible(false);
+    return { wheel, holder, home: { x, y } };
 }
 
 function colorsOf (p: Player): { main: string; dark: string }

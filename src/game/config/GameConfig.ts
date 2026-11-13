@@ -223,7 +223,7 @@ export const GameConfig = {
          */
         archer: { maxHp: 60, damage: 11, range: 95, attackIntervalMs: 900 },
         /**
-         * Guardians (won by holding a castle): heavy armour and a big shield.
+         * Guardians (won from castle Lucky Spins): heavy armour and a big shield.
          * Lots of health, light blows, one swing a second; they hold the front line.
          */
         guardian: { maxHp: 180, damage: 8, attackIntervalMs: 1000 },
@@ -235,21 +235,17 @@ export const GameConfig = {
     },
 
     /**
-     * The three capturable castles (enchanted forest, volcanic wastes, swamp).
-     * Hold the circle alone for `captureMs` to take one; it then grants Guardians.
+     * The three Lucky Spin castles (enchanted forest, volcanic wastes, swamp).
+     * Stepping into a ready castle's circle spins its reward wheel (rewards and
+     * their chances: SPIN_REWARDS in logic/Castles.ts).
      */
     castles: {
-        captureMs: 30_000,
-        /** Progress drains at half the speed it builds while the capturing army is away. */
-        decayRate: 0.5,
-        /** Guardians granted the moment a castle is taken... */
-        initialGuardians: 3,
-        /** ...then one this often while the owner holds the circle uncontested... */
-        guardianEveryMs: 10_000,
-        /** ...up to this many per capture (the first 3 included)... */
-        maxGuardians: 40,
-        /** ...then the castle rests this long before anyone can take it again. */
+        /** After a spin, the castle rests this long before it can be spun again. */
         cooldownMs: 60_000,
+        /** The wheel spins this long before the reward lands... */
+        spinMs: 2600,
+        /** ...and the result stays up this long afterwards. */
+        resultMs: 2600,
         /** Who stands in each circle is checked this often (ms), not every frame. */
         checkIntervalMs: 100,
     },
@@ -296,7 +292,7 @@ export const GameConfig = {
         pursuitIgnoreMs: 15000,
 
         // --- Castles ---
-        /** Armies this big go for castles (capture them, and hold the ones they own)... */
+        /** Armies this big go spin castle wheels that are ready... */
         castleMinSize: 6,
         /** ...within this distance of their army (world px). */
         castleSearchRadius: 1500,

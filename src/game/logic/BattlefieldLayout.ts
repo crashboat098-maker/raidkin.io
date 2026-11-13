@@ -216,7 +216,7 @@ export interface BattlefieldLayout {
     villages: Village[];
     /** Gameplay landmarks (barracks, towers, keeps...). */
     structures: Structure[];
-    /** The three capturable castles and their capture circles (none on the original-size map). */
+    /** The three Lucky Spin castles and their circles (none on the original-size map). */
     castles: CastleSite[];
     /** Visual terrain objects (some are solid, see DECORATION_COLLIDERS). */
     decorations: Decoration[];
@@ -541,7 +541,7 @@ function expandBattlefield (core: BattlefieldLayout, settings: LayoutSettings, e
         ...core.structures, ...forestStructures, ...wastes.landmarks, ...wastes.villages.flatMap((v) => v.houses), ...swamp.villages.flatMap((v) => v.houses),
         ...(swamp.castle ? [swamp.castle] : []),
     ];
-    // The three capturable castles: the fae castle, the gothic fortress, the swamp castle.
+    // The three Lucky Spin castles: the fae castle, the gothic fortress, the swamp castle.
     const fortress = wastes.landmarks.find((s) => s.type === 'gothicFortress');
     const castles: CastleSite[] = [];
     for (const [structure, biome] of [[forest.castle, 'enchanted'], [fortress, 'volcanic'], [swamp.castle, 'swamp']] as const)

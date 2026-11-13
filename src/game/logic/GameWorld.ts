@@ -21,7 +21,7 @@ export interface GameWorld {
     readonly human: Player;
     readonly neutrals: { readonly units: readonly NeutralWarrior[] };
     readonly shards: { readonly shards: readonly SoulShard[] };
-    /** The capturable castles (owner, capture progress, Guardians...). */
+    /** The Lucky Spin castles (ready or cooling down, and their latest spin). */
     readonly castles: readonly CastleStatus[];
     readonly matchStartedAt: number | null;
     readonly humanDefeated: boolean;

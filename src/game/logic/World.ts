@@ -63,8 +63,10 @@ export interface WorldEvents {
     bodiesExpired: FallenBody[];
     /** Soldiers that took a lava burn this frame (each only for its own burn). */
     lavaBurns: Warrior[];
-    /** Castles taken this frame (Guardians granted arrive in `summoned`). */
-    castlesCaptured?: CastleStatus[];
+    /** Castle wheels that started spinning this frame (soldiers won arrive in `summoned` when it lands). */
+    castleSpins?: CastleStatus[];
+    /** Soldiers lost to a castle's unlucky spin. */
+    castleLosses?: Warrior[];
 
     // Only from online play (NetWorld), where the server reports what happened:
     /** Soldiers already there when you joined (shown without an effect). */
@@ -121,7 +123,7 @@ export class World implements GameWorld
     readonly neutrals: NeutralForces;
     /** Bodies of fallen soldiers, waiting to be revived. */
     readonly fallen: FallenField;
-    /** The three capturable castles. */
+    /** The three Lucky Spin castles. */
     private readonly castleField: CastleField;
     readonly players: Player[] = [];
     readonly human: Player;
@@ -144,7 +146,7 @@ export class World implements GameWorld
         this.shards = new SoulShardField(this.layout, config.soulShards, config.world.seed + 1);
         this.neutrals = new NeutralForces(this.layout, this.obstacles, config.neutrals, config.world.seed + 2, this.nextUnitId);
         this.fallen = new FallenField(config.fallen);
-        this.castleField = new CastleField(this.layout.castles, config.castles);
+        this.castleField = new CastleField(this.layout.castles, config.castles, this.rng);
 
         this.human = createPlayer('you', this.layout.spawn, this.nextUnitId, {
             name: options.humanName ?? 'YOU', kind: 'human', colorId: options.humanColor ?? 'crimson', size: options.humanSize ?? 1,
@@ -213,7 +215,7 @@ export class World implements GameWorld
         return released;
     }
 
-    /** Every castle's state (owner, capture progress, Guardians granted...). */
+    /** Every castle's state (ready or cooling down, and its latest spin). */
     get castles (): readonly CastleStatus[]
     {
         return this.castleField.statuses;
@@ -438,15 +440,20 @@ export class World implements GameWorld
             }
         }
 
-        // 7c. Castles: capture progress, contests, cooldowns. Guardians granted by a
-        //     castle join their army like summoned soldiers (castle rewards ignore a
-        //     bot's size cap, so a castle always finishes its cycle).
+        // 7c. Castles: an army stepping into a ready castle's circle spins its wheel
+        //     (the reward is decided here, so online the server decides it). When
+        //     the wheel lands, soldiers won join like summoned ones (ignoring a
+        //     bot's size cap), or an unlucky spin takes some away.
         const castles = this.castleField.update(dt, stillAlive);
-        for (const { player, count } of castles.awards)
+        if (castles.spins.length > 0) events.castleSpins = castles.spins;
+        for (const { player, count, role } of castles.awards)
         {
-            for (let i = 0; i < count; i++) events.summoned.push({ warrior: this.summon(player, 'guardian'), owner: player });
+            if (count > 0)
+            {
+                for (let i = 0; i < count; i++) events.summoned.push({ warrior: this.summon(player, role), owner: player });
+            }
+            else (events.castleLosses ??= []).push(...this.loseSoldiers(player, -count));
         }
-        if (castles.captured.length > 0) events.castlesCaptured = castles.captured;
 
         // Track each army's largest size this run.
         for (const p of stillAlive) p.stats.peakArmy = Math.max(p.stats.peakArmy, totalSoldiers(p.army));
@@ -500,6 +507,26 @@ export class World implements GameWorld
         const centre = cluster.center.position;
         const spot = findFreeSpotNear(this.obstacles, this.layout.playArea, centre, WARRIOR_BODY, 40) ?? centre;
         return addWarrior(cluster, this.nextUnitId(), spot, this.maxHpOf(role), role);
+    }
+
+    /**
+     * Up to `count` random soldiers leave the army (an unlucky castle spin).
+     * Never the last one: the army always keeps at least one soldier.
+     */
+    private loseSoldiers (p: Player, count: number): Warrior[]
+    {
+        const pool = [...allWarriors(p.army)];
+        const lose = Math.max(0, Math.min(count, pool.length - 1));
+        // Pick `lose` at random (partial shuffle).
+        for (let i = 0; i < lose; i++)
+        {
+            const j = i + Math.floor(this.rng() * (pool.length - i));
+            [pool[i], pool[j]] = [pool[j], pool[i]];
+        }
+        if (lose === 0) return [];
+        const gone = new Set(pool.slice(0, lose));
+        for (const { cluster } of p.army.clusters) cluster.warriors = cluster.warriors.filter((w) => !gone.has(w));
+        return [...gone];
     }
 
     /**

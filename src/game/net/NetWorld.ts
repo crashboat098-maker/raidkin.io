@@ -1,6 +1,6 @@
 import type { GameConfig as GameConfigType } from '../config/GameConfig';
 import { createWarrior, type SoldierRole, type Warrior } from '../logic/Army';
-import type { CastleStatus } from '../logic/Castles';
+import { newCastleStatus, type CastleStatus } from '../logic/Castles';
 import { generateBattlefield, type BattlefieldLayout } from '../logic/BattlefieldLayout';
 import type { Death, Hit } from '../logic/Combat';
 import type { FallenBody } from '../logic/Fallen';
@@ -17,7 +17,7 @@ import type { Rect, Vec2 } from '../logic/Types';
 import { movementBounds, type WorldEvents } from '../logic/World';
 import type { NetClient } from './NetClient';
 import {
-    CASTLE_STATES, JOIN_RECRUITED, NEUTRAL_AVAILABLE, roleFromCode, WARRIOR_GUARDIAN, NEUTRAL_FACING_LEFT, NEUTRAL_KINDS, NEUTRAL_MOVING, NEUTRAL_READY, PROTOCOL_VERSION, REJOIN_GRACE_MS,
+    CASTLE_ROLES, CASTLE_STATES, JOIN_RECRUITED, NEUTRAL_AVAILABLE, roleFromCode, WARRIOR_GUARDIAN, NEUTRAL_FACING_LEFT, NEUTRAL_KINDS, NEUTRAL_MOVING, NEUTRAL_READY, PROTOCOL_VERSION, REJOIN_GRACE_MS,
     WARRIOR_ARCHER, WARRIOR_BURNING, WARRIOR_FACING_LEFT, WARRIOR_MOVING,
     type BodyRow, type DefeatMessage, type RosterRow, type ServerMessage, type SnapPlayer, type SnapshotMessage, type StateMessage, type YouRow,
 } from './Protocol';
@@ -146,9 +146,7 @@ export class NetWorld implements GameWorld
         const forces = new NeutralForces(this.layout, this.obstacles, config.neutrals, config.world.seed + 2, createIdSource());
         this.neutrals = { units: forces.units };
         for (const u of forces.units) this.neutralsBySite.set(u.siteId, u);
-        this.castles = this.layout.castles.map((site) => ({
-            site, state: 'neutral', owner: null, capturer: null, progress: 0, contested: false, awarded: 0, nextGuardianMs: null, cooldownMs: 0,
-        }));
+        this.castles = this.layout.castles.map(newCastleStatus);
         this.human = this.makePlayer('you', name, color, 'human', this.layout.spawn);
 
         net.listen((m) => this.receive(m), () => this.dropped());
@@ -239,11 +237,15 @@ export class NetWorld implements GameWorld
             this.nextPingAt = wall + PING_EVERY_MS;
             this.net.send({ t: 'ping', c: wall });
         }
-        // Castle countdowns tick on between snapshots.
+        // Castle countdowns and wheels run on between snapshots.
+        const { spinMs, resultMs } = this.config.castles;
         for (const c of this.castles)
         {
-            if (c.nextGuardianMs !== null) c.nextGuardianMs = Math.max(0, c.nextGuardianMs - dt * 1000);
             c.cooldownMs = Math.max(0, c.cooldownMs - dt * 1000);
+            if (!c.spin) continue;
+            c.spin.elapsedMs += dt * 1000;
+            c.spin.landed = c.spin.elapsedMs >= spinMs;
+            if (c.spin.elapsedMs >= spinMs + resultMs) c.spin = null;
         }
         return events;
     }
@@ -701,28 +703,22 @@ export class NetWorld implements GameWorld
             events.shardsRespawned.push(shard);
         }
 
-        // Castles (decided by the server).
+        // Castles (decided by the server: the wheel here only animates to its result).
         for (const row of m.castles)
         {
             const c = this.castles[row[0]];
             if (!c) continue;
-            const playerOf = (net: number) => {
-                const info = net >= 0 ? this.roster.get(net) : undefined;
-                return info ? this.playersById.get(info[1]) ?? null : null;
+            const [, state, cooldownMs, spinId, spinnerNet, rewardId, roleIndex, elapsedMs] = row;
+            c.state = CASTLE_STATES[state] ?? 'ready';
+            c.cooldownMs = cooldownMs;
+            if (spinId < 0) { c.spin = null; continue; }
+            if (c.spin?.id === spinId) continue; // the same spin: our own clock keeps it running smoothly
+            const info = spinnerNet >= 0 ? this.roster.get(spinnerNet) : undefined;
+            c.spin = {
+                id: spinId, player: info ? this.playersById.get(info[1]) ?? null : null, rewardId,
+                role: CASTLE_ROLES[roleIndex] ?? 'warrior', elapsedMs, landed: elapsedMs >= this.config.castles.spinMs,
             };
-            const before = c.state;
-            const ownerBefore = c.owner;
-            c.state = CASTLE_STATES[row[1]] ?? 'neutral';
-            c.owner = playerOf(row[2]);
-            c.capturer = playerOf(row[3]);
-            c.progress = row[4] / 1000;
-            c.contested = row[5] === 1;
-            c.awarded = row[6];
-            c.nextGuardianMs = row[7] < 0 ? null : row[7];
-            c.cooldownMs = row[8];
-            // Taken: from neutral, or over from another owner.
-            const taken = c.state === 'owned' && (before === 'neutral' || (ownerBefore !== null && ownerBefore !== c.owner));
-            if (taken && !firstApply) (events.castlesCaptured ??= []).push(c);
+            if (!c.spin.landed) (events.castleSpins ??= []).push(c);
         }
 
         // Fallen bodies.

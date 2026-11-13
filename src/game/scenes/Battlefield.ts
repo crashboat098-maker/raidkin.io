@@ -47,6 +47,8 @@ function devArmySize (): number | undefined
 
 /** After your last soldier falls, how long the battlefield stays up before the start menu returns. */
 const DEFEAT_PAUSE_MS = 2500;
+/** Colour of the puff when soldiers are lost to an unlucky castle spin. */
+const LOSS_PUFF = '#d8432f';
 
 export class Battlefield extends Scene
 {
@@ -279,7 +281,12 @@ export class Battlefield extends Scene
             this.fallenView.remove(body);
             this.addSoldier(warrior, owner, Palette.accent.purple);
         }
-        for (const castle of events.castlesCaptured ?? []) this.castleView.captured(castle, (x, y, color) => playJoinEffect(this, x, y, color));
+        // An unlucky castle spin: those soldiers vanish in a red puff.
+        for (const w of events.castleLosses ?? [])
+        {
+            this.armyView.release(w);
+            playJoinEffect(this, w.position.x, w.position.y, LOSS_PUFF);
+        }
         for (const { player, warriors } of events.respawned)
         {
             for (const w of warriors) this.addSoldier(w, player, Palette.accent.amber);
@@ -306,7 +313,15 @@ export class Battlefield extends Scene
         this.armyLabels.sync(world.players);
         this.crown.sync(world.players, leaderId(rankPlayers(world.players)), time);
         this.fallenView.sync(time, camera.worldView);
-        this.castleView.sync(world.castles, time, camera.worldView);
+        // Castle wheels; a burst in the result's colour around the circle when one lands.
+        this.castleView.sync(world.castles, time, camera.worldView, (c, color) => {
+            const hex = `#${color.toString(16).padStart(6, '0')}`;
+            for (let k = 0; k < 8; k++)
+            {
+                const a = (k / 8) * Math.PI * 2;
+                playJoinEffect(this, c.site.x + Math.cos(a) * c.site.radius * 0.5, c.site.y + Math.sin(a) * c.site.radius * 0.5, hex);
+            }
+        });
         this.culler.update(camera.worldView);
         // Structures/trees turn see-through only for YOUR soldiers (enemies behind cover stay hidden).
         this.seeThrough.update(human.respawnAt === null ? allWarriors(human.army).map((w) => w.position) : []);

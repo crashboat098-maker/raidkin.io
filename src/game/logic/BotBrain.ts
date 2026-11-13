@@ -22,7 +22,7 @@ import type { Rect, Vec2 } from './Types';
  *   FLEE     a much stronger army is close (or we're hurt and it's not weaker)
  *   HUNT     a clearly weaker army is in reach (big bots also search further)
  *   FIGHT    a similar-sized army is close and we're healthy
- *   CAPTURE  take a free castle nearby, or hold the one we own (Guardians)
+ *   SPIN     walk into a nearby castle whose Lucky Spin wheel is ready
  *   RECRUIT  a neutral Warrior is near (small armies weigh this highest)
  *   GATHER   a Soul Shard is near (staying away from threats)
  *   RECOVER  hurt: keep away from everyone and gather until healed
@@ -32,7 +32,7 @@ import type { Rect, Vec2 } from './Types';
  * for a while, so a bot never chases an unreachable opponent forever.
  */
 
-export type BotMode = 'explore' | 'gather' | 'recruit' | 'capture' | 'hunt' | 'fight' | 'flee' | 'recover';
+export type BotMode = 'explore' | 'gather' | 'recruit' | 'spin' | 'hunt' | 'fight' | 'flee' | 'recover';
 
 interface Pursuit {
     playerId: string;
@@ -88,7 +88,7 @@ export interface BotView {
     neutrals: readonly NeutralWarrior[];
     /** Fallen soldiers that can be revived right now. */
     bodies?: readonly FallenBody[];
-    /** The capturable castles. */
+    /** The Lucky Spin castles. */
     castles?: readonly CastleStatus[];
     obstacles: ObstacleMap;
     bounds: Rect;
@@ -291,17 +291,12 @@ function decide (bot: Player, view: BotView, now: number, s: BotSettings): void
     const danger = visible.filter((r) => r.strength >= myStrength * s.engageRatio);
     const safe = (p: Vec2) => danger.every((d) => distance(p, d.centre) > 140);
 
-    // CAPTURE: hold a castle we own while it still grants Guardians, or go take a
-    // free one (also to stop someone else taking it). Inside the circle, keep
-    // milling about in it rather than walking out.
-    const castle = !injured ? castleGoal(bot, view.castles ?? [], me, mine.length, s) : null;
+    // SPIN: walk into a castle whose Lucky Spin wheel is ready (stepping in spins it).
+    const castle = !injured ? castleGoal(view.castles ?? [], me, mine.length, s) : null;
     if (castle)
     {
-        state.mode = 'capture';
-        const { site } = castle;
-        const spread = site.radius * 0.45;
-        const spot = { x: site.x + randRange(view.rng, -spread, spread), y: site.y + randRange(view.rng, -spread * 0.6, spread * 0.8) };
-        setTarget(state, spot, now, me);
+        state.mode = 'spin';
+        setTarget(state, { x: castle.site.x, y: castle.site.y }, now, me);
         return;
     }
 
@@ -344,22 +339,20 @@ function decide (bot: Player, view: BotView, now: number, s: BotSettings): void
 }
 
 /**
- * The castle worth going to: one we own that is still granting Guardians
- * (always, if it's in reach), else the nearest free one in reach (neutral,
- * not resting), if the army is big enough to take and hold it.
+ * The nearest castle in reach whose wheel is ready, if the army is big enough.
+ * One we're already standing in is skipped: a spin needs stepping in, so
+ * the bot wanders off and can come back later.
  */
-function castleGoal (bot: Player, castles: readonly CastleStatus[], me: Vec2, size: number, s: BotSettings): CastleStatus | null
+function castleGoal (castles: readonly CastleStatus[], me: Vec2, size: number, s: BotSettings): CastleStatus | null
 {
-    const reach = s.castleSearchRadius ?? 0;
-    const near = (c: CastleStatus) => distance(me, c.site) <= reach;
-    const owned = castles.find((c) => c.state === 'owned' && c.owner === bot && near(c));
-    if (owned) return owned;
     if (size < (s.castleMinSize ?? Infinity)) return null;
+    const reach = s.castleSearchRadius ?? 0;
     let best: CastleStatus | null = null;
     for (const c of castles)
     {
-        if (c.state !== 'neutral' || !near(c)) continue;
-        if (!best || distance(me, c.site) < distance(me, best.site)) best = c;
+        const d = distance(me, c.site);
+        if (c.state !== 'ready' || d > reach || d <= c.site.radius) continue;
+        if (!best || d < distance(me, best.site)) best = c;
     }
     return best;
 }
