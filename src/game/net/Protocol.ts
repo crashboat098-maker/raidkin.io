@@ -35,7 +35,9 @@ export type ClientMessage =
     /** Steering direction, each axis -1..1, and (mouse) how far away the target is. */
     | { t: 'in'; x: number; y: number; r?: number }
     | { t: 'split'; x: number; y: number }
-    | { t: 'surrender'; x: number; y: number };
+    | { t: 'surrender'; x: number; y: number }
+    /** Round-trip time check for the performance overlay: the server answers 'pong' with the same `c`. */
+    | { t: 'ping'; c: number };
 
 // ---------------------------------------------------------------------------
 // Server -> browser
@@ -130,7 +132,10 @@ export interface DefeatMessage {
     competitors: number;
 }
 
-export type ServerMessage = LobbyMessage | JoinedMessage | ErrorMessage | StateMessage | SnapshotMessage | DefeatMessage | RosterMessage;
+/** The answer to a 'ping' (same `c`). */
+export interface PongMessage { t: 'pong'; c: number }
+
+export type ServerMessage = LobbyMessage | JoinedMessage | ErrorMessage | StateMessage | SnapshotMessage | DefeatMessage | RosterMessage | PongMessage;
 
 export interface YouRow {
     soulShards: number;

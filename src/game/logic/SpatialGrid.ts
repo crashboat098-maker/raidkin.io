@@ -1,3 +1,4 @@
+import { perfCounters } from './PerfCounters';
 import type { Vec2 } from './Types';
 
 /**
@@ -41,6 +42,7 @@ export class SpatialGrid<T extends { position: Vec2 }>
             {
                 const bucket = this.buckets.get(this.key(c, r));
                 if (!bucket) continue;
+                perfCounters.collisionChecks += bucket.length;
                 for (let i = 0; i < bucket.length; i++) fn(bucket[i]);
             }
         }

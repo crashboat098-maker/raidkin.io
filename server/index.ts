@@ -165,14 +165,46 @@ function collectEvents (events: WorldEvents, now: number): void
     for (const r of events.bodiesRevived) e.bodiesRemoved.push(r.body.id);
 }
 
+/**
+ * Performance log: every STATS_EVERY_MS while people play, one line with how
+ * long ticks take, how late they run, and how much CPU the server uses (on a
+ * small hosting plan, running out of CPU is what makes snapshots arrive late).
+ */
+const STATS_EVERY_MS = 30_000;
+const stats = { ticks: 0, workMs: 0, maxWorkMs: 0, lateTicks: 0, maxGapMs: 0, since: 0, cpu: process.cpuUsage() };
+
+function recordTick (gapMs: number, workMs: number, now: number): void
+{
+    stats.ticks++;
+    stats.workMs += workMs;
+    stats.maxWorkMs = Math.max(stats.maxWorkMs, workMs);
+    stats.maxGapMs = Math.max(stats.maxGapMs, gapMs);
+    if (gapMs > TICK_MS * 2) stats.lateTicks++;
+    if (now - stats.since < STATS_EVERY_MS) return;
+    const cpu = process.cpuUsage(stats.cpu);
+    const cpuPercent = ((cpu.user + cpu.system) / 1000 / (now - stats.since)) * 100;
+    const soldiers = world.players.reduce((n, p) => n + (p.respawnAt === null ? allWarriors(p.army).length : 0), 0);
+    if (stats.since > 0)
+    {
+        console.log(`[perf] ${playingCount()} playing, ${world.players.length} armies, ${soldiers} soldiers | tick avg ${(stats.workMs / stats.ticks).toFixed(2)} ms, max ${stats.maxWorkMs.toFixed(1)} ms | late ticks ${stats.lateTicks}/${stats.ticks}, longest gap ${stats.maxGapMs.toFixed(0)} ms | cpu ${cpuPercent.toFixed(1)}%`);
+    }
+    Object.assign(stats, { ticks: 0, workMs: 0, maxWorkMs: 0, lateTicks: 0, maxGapMs: 0, since: now, cpu: process.cpuUsage() });
+}
+
 function step (): void
 {
     const now = clock();
-    const dt = Math.min(0.05, (now - lastTickAt) / 1000);
+    const gapMs = now - lastTickAt;
+    const dt = Math.min(0.05, gapMs / 1000);
     lastTickAt = now;
     // Nobody playing: the match is switched off (no bots fighting to an empty room).
-    if (playingCount() === 0) return;
+    if (playingCount() === 0) { stats.since = 0; return; }
+    try { tickMatch(now, dt); }
+    finally { recordTick(gapMs, clock() - now, now); }
+}
 
+function tickMatch (now: number, dt: number): void
+{
     const commands = new Map<Player, PlayerCommand>();
     for (const c of clients) if (c.player) commands.set(c.player, c.command);
     const events = world.update(now, dt, { x: 0, y: 0 }, null, null, commands);
@@ -405,6 +437,9 @@ function handle (client: Client, raw: string): void
             if (direction) client.command = { ...client.command, surrender: direction };
             return;
         }
+        case 'ping':
+            if (typeof message.c === 'number' && Number.isFinite(message.c)) send(client, { t: 'pong', c: message.c });
+            return;
     }
 }
 
