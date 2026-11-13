@@ -7,7 +7,7 @@ import { ensurePixelFont, PIXEL_FONT } from '../render/PixelFont';
 import { createPlaceholderTextures, Tex } from '../render/PlaceholderArt';
 import { CRYSTAL_GLOWS, createTitleTextures, TitleTex, VOLCANO } from '../render/TitleArt';
 import { BUTTON_PRIMARY, PixelButton } from '../render/UiKit';
-import { Music, playMusic, stopMusic } from '../render/Music';
+import { isMuted, Music, playMusic, setMuted, stopMusic } from '../render/Music';
 import { netClient } from '../net/NetClient';
 import { isNameChar, loadSettings, NAME_MAX_LENGTH, sanitizeName, saveSettings, type PlayerSettings } from './PlayerSettings';
 
@@ -98,7 +98,9 @@ export class Start extends Scene
         this.drawWorld();
         this.drawLogo();
         // The start screen's theme (it waits for the first tap or key if the browser insists).
+        this.sound.mute = isMuted();
         playMusic(this, Music.start);
+        this.addMuteButton();
 
         // --- The panel ---
         const g = this.add.graphics();
@@ -248,6 +250,50 @@ export class Start extends Scene
         g.lineTo(cx - 3, cy + 8);
         g.lineTo(cx + 12, cy - 8);
         g.strokePath();
+    }
+
+    /**
+     * A sound on / off button in the top-right corner: a speaker with sound
+     * waves, or crossed out in red when muted. The choice is remembered.
+     */
+    private addMuteButton (): void
+    {
+        const size = 48;
+        const x = W - size - 18;
+        const y = 18;
+        const g = this.add.graphics();
+        let hovered = false;
+        const draw = () => {
+            const muted = this.sound.mute;
+            g.clear();
+            g.fillStyle(0x000000, 0.5).fillRect(x + 3, y + 4, size, size);
+            g.fillStyle(PANEL_FILL, hovered ? 0.95 : 0.82).fillRect(x, y, size, size);
+            g.lineStyle(2, hovered ? GOLD_LIGHT : GOLD, 1).strokeRect(x, y, size, size);
+            g.lineStyle(1, VIOLET, 0.9).strokeRect(x + 4, y + 4, size - 8, size - 8);
+            // The speaker, in chunky pixels.
+            const px = (cx: number, cy: number, w: number, h: number, color: number) => g.fillStyle(color, 1).fillRect(x + cx * 3, y + cy * 3, w * 3, h * 3);
+            const ink = muted ? 0x8c86a8 : 0xf2ecff;
+            px(3, 6, 2, 4, ink);
+            px(5, 5, 1, 6, ink);
+            px(6, 4, 1, 8, ink);
+            px(7, 3, 1, 10, ink);
+            if (muted)
+            {
+                // A red cross.
+                for (let k = 0; k < 5; k++) { px(9 + k, 5 + k, 1, 1, 0xd8432f); px(13 - k, 5 + k, 1, 1, 0xd8432f); }
+            }
+            else
+            {
+                // Sound waves.
+                px(9, 6, 1, 4, 0x8dffb5);
+                px(11, 5, 1, 1, 0x7fd4ff); px(12, 6, 1, 4, 0x7fd4ff); px(11, 10, 1, 1, 0x7fd4ff);
+            }
+        };
+        draw();
+        this.add.zone(x, y, size, size).setOrigin(0, 0).setInteractive({ useHandCursor: true })
+            .on('pointerover', () => { hovered = true; draw(); })
+            .on('pointerout', () => { hovered = false; draw(); })
+            .on('pointerdown', () => { setMuted(this, !this.sound.mute); draw(); });
     }
 
     private label (x: number, y: number, text: string, originX = 0): void

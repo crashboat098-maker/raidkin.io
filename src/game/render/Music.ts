@@ -22,6 +22,22 @@ export const Music = {
 } satisfies Record<string, MusicTrack>;
 
 const FADE_STEP_MS = 50;
+const MUTE_KEY = 'raidkin.muted';
+
+/** Is sound muted? (Remembered in this browser.) */
+export function isMuted (): boolean
+{
+    try { return localStorage.getItem(MUTE_KEY) === '1'; }
+    catch { return false; }
+}
+
+/** Mute or unmute all sound, and remember the choice. */
+export function setMuted (scene: Scene, muted: boolean): void
+{
+    scene.sound.mute = muted;
+    try { localStorage.setItem(MUTE_KEY, muted ? '1' : '0'); }
+    catch { /* private mode: it just won't be remembered */ }
+}
 
 let current: Sound.BaseSound | null = null;
 let currentKey: string | null = null;
