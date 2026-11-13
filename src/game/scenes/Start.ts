@@ -152,13 +152,16 @@ export class Start extends Scene
                 if (netClient.online && lobby)
                 {
                     const here = `${lobby.online} ${lobby.online === 1 ? 'PERSON' : 'PEOPLE'} HERE - ${lobby.playing} PLAYING`;
-                    status.setText(lobby.full ? 'SERVER FULL - PRACTICE VS BOTS' : here).setTint(TEXT.status);
+                    status.setText(lobby.full ? 'SERVER FULL' : here).setTint(TEXT.status);
                 }
-                else if (netClient.configured) status.setText('CONNECTING - OR PRACTICE VS BOTS').setTint(TEXT.dim);
-                else status.setText('PRACTICE VS BOTS').setTint(TEXT.status);
+                else if (netClient.configured) status.setText('CONNECTING...').setTint(TEXT.dim);
+                else status.setText('');
             }
+            // Nothing to say (no server): no status strip at all.
+            statusBack.clear();
+            if (!status.text) return;
             const w = status.width + 36;
-            statusBack.clear().fillStyle(PANEL_FILL, 0.72).fillRect(W / 2 - w / 2, PANEL.y - 30, w, 26);
+            statusBack.fillStyle(PANEL_FILL, 0.72).fillRect(W / 2 - w / 2, PANEL.y - 30, w, 26);
             diamond(statusBack, W / 2 - w / 2 + 10, PANEL.y - 17, 4, 0x8dffb5);
             diamond(statusBack, W / 2 + w / 2 - 10, PANEL.y - 17, 4, 0x8dffb5);
         };
