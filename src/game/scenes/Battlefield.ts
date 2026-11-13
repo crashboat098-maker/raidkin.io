@@ -19,6 +19,7 @@ import { botColorsFor, Palette } from '../render/Palette';
 import { loadSettings, type PlayerSettings } from './PlayerSettings';
 import { ensurePixelFont } from '../render/PixelFont';
 import { createPlaceholderTextures, Tex } from '../render/PlaceholderArt';
+import { PerfOverlay } from '../render/PerfOverlay';
 import { SeeThroughGroup } from '../render/SeeThrough';
 import { SoulShardView } from '../render/SoulShardView';
 import { packTextures } from '../render/TextureAtlas';
@@ -33,6 +34,17 @@ import type { DefeatData } from './Defeat';
  * this scene just feeds it keyboard input and draws what happens:
  *   keyboard  ->  World.update()  ->  events  ->  visuals
  */
+/**
+ * Performance testing (dev server only, never in the built game): `?army=250`
+ * starts a practice match with that many soldiers.
+ */
+function devArmySize (): number | undefined
+{
+    if (!import.meta.env.DEV) return undefined;
+    const n = Number(new URLSearchParams(location.search).get('army'));
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+}
+
 /** After your last soldier falls, how long the battlefield stays up before the start menu returns. */
 const DEFEAT_PAUSE_MS = 2500;
 
@@ -92,7 +104,7 @@ export class Battlefield extends Scene
             // The rest is set up once the server has sent the starting state (see update).
             return;
         }
-        this.world = new World(GameConfig, { humanName: this.settings.name, humanColor: this.settings.color }, botColorsFor(this.settings.color));
+        this.world = new World(GameConfig, { humanName: this.settings.name, humanColor: this.settings.color, humanSize: devArmySize() }, botColorsFor(this.settings.color));
         this.setUpMatch();
     }
 
@@ -172,6 +184,14 @@ export class Battlefield extends Scene
             archerCost: GameConfig.army.archerCost,
         };
         this.scene.launch('Hud', hudData);
+
+        // 7. Performance overlay (F3, or ?perf in the address). Hidden by default.
+        const net = this.net;
+        const overlay = new PerfOverlay(this.game, this, {
+            soldiers: () => this.world.players.reduce((n, p) => n + (p.respawnAt === null ? totalSoldiers(p.army) : 0), 0),
+            net: net ? () => net.takeNetStats() : null,
+        });
+        this.events.once('shutdown', () => overlay.destroy());
     }
 
     update (time: number, delta: number)

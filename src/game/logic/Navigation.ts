@@ -1,5 +1,6 @@
 import { findFreeSpotNear, hasClearPath, hasDryPath, WARRIOR_BODY } from './Army';
 import { bodyRect, type ObstacleMap } from './Obstacles';
+import { perfCounters } from './PerfCounters';
 import type { Rect, Vec2 } from './Types';
 
 /**
@@ -146,6 +147,15 @@ export interface FoundPath {
  * null if nothing better than standing still was found.
  */
 export function findPath (obstacles: ObstacleMap, bounds: Rect, from: Vec2, to: Vec2): FoundPath | null
+{
+    const startedAt = performance.now();
+    const found = searchPath(obstacles, bounds, from, to);
+    perfCounters.pathSearches++;
+    perfCounters.pathMs += performance.now() - startedAt;
+    return found;
+}
+
+function searchPath (obstacles: ObstacleMap, bounds: Rect, from: Vec2, to: Vec2): FoundPath | null
 {
     // Aim at a free spot: a goal inside a tree or a river would never be reached.
     const goalPoint = findFreeSpotNear(obstacles, bounds, to, WARRIOR_BODY, 48) ?? to;

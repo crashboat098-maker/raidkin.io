@@ -42,6 +42,8 @@ type Config = typeof GameConfigType;
  * own army is predicted, so this delay only applies to what others do.
  */
 const INTERPOLATION_MS = 200;
+/** Round-trip check for the performance overlay (a tiny message). */
+const PING_EVERY_MS = 2000;
 /** Send steering at most this often (and at least this often while it changes). */
 const INPUT_INTERVAL_MS = 50;
 const INPUT_KEEPALIVE_MS = 400;
@@ -127,6 +129,12 @@ export class NetWorld implements GameWorld
     private steerDir: Vec2 = { x: 0, y: 0 };
     private graceUntil = 0;
     private readonly moveBounds: Rect;
+    /** Performance overlay (F3): round trip to the server, snapshot arrivals, frames spent waiting for one. */
+    private pingMs: number | null = null;
+    private nextPingAt = 0;
+    private readonly snapshotArrivals: number[] = [];
+    private waitingFrames = 0;
+    private frames = 0;
 
     constructor (private readonly config: Config, private readonly net: NetClient, name: string, color: string)
     {
@@ -223,6 +231,14 @@ export class NetWorld implements GameWorld
         }
         this.interpolate(renderTime);
         this.predictOwnArmy(input, now, dt);
+        this.frames++;
+        if (this.applied && this.pending.length === 0) this.waitingFrames++;
+        const wall = performance.now();
+        if (wall >= this.nextPingAt)
+        {
+            this.nextPingAt = wall + PING_EVERY_MS;
+            this.net.send({ t: 'ping', c: wall });
+        }
         // Castle countdowns tick on between snapshots.
         for (const c of this.castles)
         {
@@ -378,6 +394,11 @@ export class NetWorld implements GameWorld
                 else this.refused = m.reason;
                 return;
             case 'lobby': return;
+            case 'pong': {
+                const rtt = performance.now() - m.c;
+                if (rtt >= 0 && rtt < 10_000) this.pingMs = this.pingMs === null ? rtt : this.pingMs + (rtt - this.pingMs) * 0.3;
+                return;
+            }
             case 'roster':
                 this.roster.clear();
                 for (const row of m.players) this.roster.set(row[0], row);
@@ -421,8 +442,25 @@ export class NetWorld implements GameWorld
         this.ready = true;
     }
 
+    /** Connection numbers for the performance overlay, counted since the last call. */
+    takeNetStats (): { pingMs: number | null; snapshotsPerSecond: number; longestGapMs: number; waitingPercent: number; delayMs: number }
+    {
+        const now = performance.now();
+        const recent = this.snapshotArrivals.filter((t) => now - t <= 2000);
+        let longestGapMs = 0;
+        for (let i = 1; i < recent.length; i++) longestGapMs = Math.max(longestGapMs, recent[i] - recent[i - 1]);
+        this.snapshotArrivals.length = 0;
+        this.snapshotArrivals.push(...recent);
+        const waitingPercent = this.frames > 0 ? (100 * this.waitingFrames) / this.frames : 0;
+        this.frames = 0;
+        this.waitingFrames = 0;
+        return { pingMs: this.pingMs, snapshotsPerSecond: recent.length / 2, longestGapMs, waitingPercent, delayMs: INTERPOLATION_MS };
+    }
+
     private queueSnapshot (m: SnapshotMessage): void
     {
+        this.snapshotArrivals.push(performance.now());
+        if (this.snapshotArrivals.length > 64) this.snapshotArrivals.shift();
         const sample = m.time - performance.now();
         // Follow the server clock smoothly; jump if it's far off (first snapshot, or a stall).
         this.clockOffset = this.clockOffset === null || Math.abs(sample - this.clockOffset) > 1000
