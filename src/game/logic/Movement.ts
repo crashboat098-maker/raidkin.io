@@ -71,21 +71,7 @@ export function updateMover (
     const targetX = dirX * tuning.maxSpeed * terrain;
     const targetY = dirY * tuning.maxSpeed * terrain;
     const rate = inputLength > 0 ? tuning.acceleration : tuning.deceleration;
-    const diffX = targetX - mover.velocity.x;
-    const diffY = targetY - mover.velocity.y;
-    const diffLength = Math.hypot(diffX, diffY);
-    const maxChange = rate * dt;
-
-    if (diffLength <= maxChange)
-    {
-        mover.velocity.x = targetX;
-        mover.velocity.y = targetY;
-    }
-    else
-    {
-        mover.velocity.x += (diffX / diffLength) * maxChange;
-        mover.velocity.y += (diffY / diffLength) * maxChange;
-    }
+    steerVelocity(mover.velocity, targetX, targetY, rate * dt);
 
     // 3. Move, stopping at (and sliding along) obstacles.
     const dx = mover.velocity.x * dt;
@@ -137,4 +123,27 @@ export function updateMover (
     }
 
     mover.isMoving = Math.hypot(mover.velocity.x, mover.velocity.y) > 5;
+}
+
+/**
+ * Change a velocity toward a target velocity. The direction snaps to the
+ * target's at once (turns are instant, no drifting round a curve); only the
+ * speed eases up or down, by at most `maxSpeedChange`. With no target
+ * (stopping) it slows down along the way it was already going.
+ */
+export function steerVelocity (velocity: Vec2, targetX: number, targetY: number, maxSpeedChange: number): void
+{
+    const targetSpeed = Math.hypot(targetX, targetY);
+    const speed = Math.hypot(velocity.x, velocity.y);
+    if (targetSpeed < 0.001)
+    {
+        const next = Math.max(0, speed - maxSpeedChange);
+        const scale = speed > 0 ? next / speed : 0;
+        velocity.x *= scale;
+        velocity.y *= scale;
+        return;
+    }
+    const next = speed < targetSpeed ? Math.min(targetSpeed, speed + maxSpeedChange) : Math.max(targetSpeed, speed - maxSpeedChange);
+    velocity.x = (targetX / targetSpeed) * next;
+    velocity.y = (targetY / targetSpeed) * next;
 }

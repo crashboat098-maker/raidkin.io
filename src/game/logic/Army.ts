@@ -1,4 +1,4 @@
-import { createMover, type MoverState } from './Movement';
+import { createMover, steerVelocity, type MoverState } from './Movement';
 import { bodyRect, type Body, type ObstacleMap } from './Obstacles';
 import { createRng } from './Random';
 import { SpatialGrid } from './SpatialGrid';
@@ -332,7 +332,7 @@ export function updateCluster (
     settings: ClusterSettings,
 ): void
 {
-    updateHeading(cluster, dt);
+    updateHeading(cluster);
     updateTrail(cluster, settings);
 
     const slots = formationSlots(settings.formationSpacing, Math.max(30, cluster.warriors.length));
@@ -426,7 +426,7 @@ export function updateCluster (
         desiredX += push.x * topSpeed * pushStrength;
         desiredY += push.y * topSpeed * pushStrength;
 
-        // 5. Ease toward the desired velocity (no instant direction snaps).
+        // 5. Turn to the desired direction at once; only the speed eases.
         accelerate(warrior.velocity, desiredX, desiredY, settings.warriorAcceleration * dt);
 
         // 6. Move, sliding along obstacles.
@@ -436,7 +436,11 @@ export function updateCluster (
         if (moved.blockedX) warrior.velocity.x = 0;
         if (moved.blockedY) warrior.velocity.y = 0;
 
-        if (Math.abs(warrior.velocity.x) > 3) warrior.facing = warrior.velocity.x > 0 ? 1 : -1;
+        // Marching: everyone faces the way the army is steered, the instant it turns
+        // (not when each soldier's own feet have come round). Fighting soldiers face their foe.
+        const steerX = cluster.center.velocity.x;
+        if (!engaged && Math.abs(steerX) > 3) warrior.facing = steerX > 0 ? 1 : -1;
+        else if (Math.abs(warrior.velocity.x) > 3) warrior.facing = warrior.velocity.x > 0 ? 1 : -1;
         warrior.isMoving = Math.hypot(warrior.velocity.x, warrior.velocity.y) > 8;
 
         // 7. Stuck while travelling (e.g. jammed in a gap, or a detour that
@@ -468,25 +472,15 @@ export function updateCluster (
     }
 }
 
-function updateHeading (cluster: Cluster, dt: number): void
+function updateHeading (cluster: Cluster): void
 {
     const { x: vx, y: vy } = cluster.center.velocity;
     const speed = Math.hypot(vx, vy);
     if (speed < 10) return; // keep the last heading when stopped
 
-    const blend = Math.min(1, dt * 3);
-    let hx = cluster.heading.x + (vx / speed - cluster.heading.x) * blend;
-    let hy = cluster.heading.y + (vy / speed - cluster.heading.y) * blend;
-    let length = Math.hypot(hx, hy);
-    if (length < 0.2)
-    {
-        // Exact U-turn: nudge sideways so it turns instead of collapsing.
-        hx = cluster.heading.x - cluster.heading.y * 0.5 + vx / speed * blend;
-        hy = cluster.heading.y + cluster.heading.x * 0.5 + vy / speed * blend;
-        length = Math.hypot(hx, hy);
-    }
-    cluster.heading.x = hx / length;
-    cluster.heading.y = hy / length;
+    // The formation (archers at the back, guardians in front) turns the instant the army does.
+    cluster.heading.x = vx / speed;
+    cluster.heading.y = vy / speed;
 }
 
 function updateTrail (cluster: Cluster, settings: ClusterSettings): void
@@ -799,19 +793,7 @@ export function findFreeSpotNear (obstacles: ObstacleMap, bounds: Rect, point: V
 
 function accelerate (velocity: Vec2, targetX: number, targetY: number, maxChange: number): void
 {
-    const dx = targetX - velocity.x;
-    const dy = targetY - velocity.y;
-    const d = Math.hypot(dx, dy);
-    if (d <= maxChange)
-    {
-        velocity.x = targetX;
-        velocity.y = targetY;
-    }
-    else
-    {
-        velocity.x += (dx / d) * maxChange;
-        velocity.y += (dy / d) * maxChange;
-    }
+    steerVelocity(velocity, targetX, targetY, maxChange);
 }
 
 export function distance (a: Vec2, b: Vec2): number
