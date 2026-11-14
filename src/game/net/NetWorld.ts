@@ -37,12 +37,14 @@ type Config = typeof GameConfigType;
  */
 
 /**
- * 200 rather than ~2 snapshots' worth: the live server sometimes pauses for
- * 100-200 ms (a small cloud instance). With a shorter buffer, everything froze
- * during a pause and then jumped ahead (it looked like rubber-banding). Your
- * own army is predicted, so this delay only applies to what others do.
+ * About 1.6 snapshots' worth (they come every ~67 ms). It was 200 while the
+ * live server sometimes paused for 100-200 ms; since the server fixes and the
+ * bigger instance, its logs show no late ticks and gaps of at most ~45 ms, so
+ * other armies can be shown much closer to "now". Raise it again if the F3
+ * overlay's "waiting" climbs above 0%. Your own army is predicted, so this
+ * delay only applies to what others do.
  */
-const INTERPOLATION_MS = 200;
+const INTERPOLATION_MS = 110;
 /** Round-trip check for the performance overlay (a tiny message). */
 const PING_EVERY_MS = 2000;
 /** Send steering at most this often (and at least this often while it changes). */

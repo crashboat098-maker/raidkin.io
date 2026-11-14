@@ -127,6 +127,8 @@ function takeDetourSearch (now: number): boolean
 }
 /** Warriors heading for the centre (not yet in formation) stop this close to it. */
 const CENTER_STANDOFF = 10;
+/** How hard a soldier closes in on its formation spot (per second, times the distance). Was 5. */
+const SETTLE_RATE = 10;
 /** Fighting Warriors stop this close to their enemy (inside striking range). */
 const ENGAGE_STANDOFF = 8;
 
@@ -399,7 +401,9 @@ export function updateCluster (
 
         let speed = topSpeed;
         // Slow down near the slot and stop when close enough (prevents fidgeting).
-        if (arriving) speed = goalDistance < 2.5 ? 0 : Math.min(topSpeed, goalDistance * 5);
+        // A firm settle (closes the gap at 10x its size per second) keeps the formation
+        // tight and moving as one block, instead of soldiers drifting in behind.
+        if (arriving) speed = goalDistance < 2.5 ? 0 : Math.min(topSpeed, goalDistance * SETTLE_RATE);
         // Heading for the centre: stop a step short instead of crowding it.
         if (warrior.route.mode === 'center' && !engaged) speed = goalDistance < CENTER_STANDOFF ? 0 : Math.min(topSpeed, (goalDistance - CENTER_STANDOFF) * 5 + 10);
         // Fighting: close in to striking distance, then hold.

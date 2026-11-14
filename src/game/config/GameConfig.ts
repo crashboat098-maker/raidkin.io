@@ -18,7 +18,7 @@ export const GameConfig = {
         /** Zoom at the start of a match (2 = every art pixel becomes a 2x2 block on screen). */
         zoom: 2.6,
         /** 0..1 â€” lower is a softer, more delayed camera follow. */
-        followLerp: 0.3,
+        followLerp: 1,
         /**
          * Dynamic zoom: close in for small armies, out for big or split ones.
          * The camera keeps the army's actual spread (all clusters) on screen.
@@ -179,7 +179,7 @@ export const GameConfig = {
         /** Extra speed multiplier when a Warrior has fallen far behind. */
         catchUpMultiplier: 1.4,
         /** How quickly a Warrior speeds up and turns (higher = snappier, lower = icier). */
-        warriorAcceleration: 1400,
+        warriorAcceleration: 3000,
         /** Warriors gently push apart when closer than this. */
         separationDistance: 10,
         /** How often each Warrior re-plans its route (ms). Staggered across Warriors. */

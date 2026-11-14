@@ -16,7 +16,8 @@ const config: Types.Core.GameConfig = {
     backgroundColor: '#070906',
     // Keep pixel art crisp (no blurring when scaled up).
     pixelArt: true,
-    roundPixels: true,
+    // Off: rounding makes moving sprites step in visible jumps (see Battlefield's camera).
+    roundPixels: false,
     scale: {
         mode: Scale.FIT,
         autoCenter: Scale.CENTER_BOTH

@@ -155,7 +155,9 @@ export class Battlefield extends Scene
         this.zoom = new ZoomController(GameConfig.camera, camera.height, GameConfig.camera.zoom);
         camera.setBounds(0, 0, layout.worldWidth, layout.worldHeight);
         camera.setZoom(this.zoom.zoom);
-        camera.setRoundPixels(true);
+        // No whole-pixel rounding: it makes moving things step in jumps when the 1280x720
+        // picture is stretched to the window, instead of gliding.
+        camera.setRoundPixels(false);
         this.followHuman();
         camera.centerOn(layout.spawn.x, layout.spawn.y);
 
@@ -396,6 +398,6 @@ export class Battlefield extends Scene
         if (target === this.cameraTarget) return;
         this.cameraTarget = target;
         const { followLerp } = GameConfig.camera;
-        this.cameras.main.startFollow(target, true, followLerp, followLerp);
+        this.cameras.main.startFollow(target, false, followLerp, followLerp);
     }
 }
