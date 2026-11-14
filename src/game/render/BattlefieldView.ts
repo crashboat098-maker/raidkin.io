@@ -14,7 +14,7 @@ import { hexToInt, Palette } from './Palette';
 import { Tex } from './PlaceholderArt';
 import type { SeeThroughGroup } from './SeeThrough';
 import { addTrails } from './TrailView';
-import { bakeFlatDecorations } from './GroundBake';
+import { bakeGround } from './GroundBake';
 
 /**
  * Draws the battlefield described by a BattlefieldLayout.
@@ -137,6 +137,7 @@ const FLAT_KINDS = new Set<DecorationKind>(['rockSmall', 'pebbles', 'flowers', '
 
 export function buildBattlefieldView (scene: Scene, layout: BattlefieldLayout, seeThrough: SeeThroughGroup): void
 {
+    const groundFrom = scene.children.list.length;
     buildGround(scene, layout);
     addTerrain(scene, layout, Depth.Terrain);
     addLavaRivers(scene, layout, Depth.Lava);
@@ -153,8 +154,9 @@ export function buildBattlefieldView (scene: Scene, layout: BattlefieldLayout, s
     {
         addDecoration(scene, decoration, seeThrough, flat);
     }
-    bakeFlatDecorations(scene, flat, layout.worldWidth, layout.worldHeight, Depth.FlatDecorations);
     buildArenaScenery(scene, layout);
+    // Ground tiles, banks, lava, water, paths and flat decorations become one background image.
+    bakeGround(scene, scene.children.list.slice(groundFrom), flat, Depth.FlatDecorations, layout.worldWidth, layout.worldHeight, Depth.Ground);
 }
 
 /**
