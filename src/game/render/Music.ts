@@ -20,9 +20,7 @@ export interface MusicTrack {
 
 export const Music = {
     /** "4 DFM" from the Dark Fantasy Music Pack Vol.1: the start screen. */
-    // The one-file build (npm run build:single) carries only the MP3: every browser
-    // plays it, and packing both formats into the page would nearly double its size.
-    start: { key: 'music-start', urls: import.meta.env.MODE === 'single' ? [startThemeMp3] : [startThemeOgg, startThemeMp3], volume: 0.45, startAt: 10 },
+    start: { key: 'music-start', urls: [startThemeOgg, startThemeMp3], volume: 0.45, startAt: 10 },
 } satisfies Record<string, MusicTrack>;
 
 const FADE_STEP_MS = 50;
