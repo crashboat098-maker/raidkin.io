@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "raidkin",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev-nolog"],
+      "port": 8080
+    },
+    {
+      "name": "raidkin-online",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["start"],
+      "port": 8787
+    }
+  ]
+}
