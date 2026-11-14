@@ -5,8 +5,12 @@ multiplayer server. Your Squarespace page then shows that game page in a frame.
 
 ```
 terravela.tech (Squarespace page)
-   └─ <iframe>  ──>  https://raidkin-online.onrender.com   (game page + multiplayer)
+   └─ <iframe>  ──>  https://raidkin-io-1.onrender.com   (game page + multiplayer)
 ```
+
+The live service on Render is **raidkin.io-1** (`https://raidkin-io-1.onrender.com`),
+on a paid instance (0.5 CPU, 512 MB). An older duplicate, `raidkin-online`, is
+suspended and not used.
 
 If the server can't be reached, the game still works: the start screen says
 `PRACTICE VS BOTS` and you play against bots in your own browser.
@@ -45,7 +49,7 @@ Optional environment variables:
 | Variable | What it does |
 |---|---|
 | `MAX_PLAYERS` | Most people playing at once (default 40). |
-| `ALLOWED_ORIGINS` | Comma-separated page addresses allowed to connect, e.g. `https://raidkin-online.onrender.com`. Empty means any. |
+| `ALLOWED_ORIGINS` | Comma-separated page addresses allowed to connect, e.g. `https://raidkin-io-1.onrender.com,https://terravela.tech`. Empty means any. |
 
 **Free plan note:** a free Render service goes to sleep after about 15 minutes
 with no visitors. The next visitor waits up to a minute while it wakes up, and
@@ -60,7 +64,7 @@ the battlefield starts fresh. A paid instance stays awake.
 ```html
 <div style="position:relative;width:100%;max-width:1280px;margin:0 auto;aspect-ratio:16/9;background:#050605;border-radius:12px;overflow:hidden">
   <iframe
-    src="https://raidkin-online.onrender.com/"
+    src="https://raidkin-io-1.onrender.com/"
     title="RAIDKIN.IO"
     style="position:absolute;inset:0;width:100%;height:100%;border:0"
     allow="fullscreen; gamepad"
