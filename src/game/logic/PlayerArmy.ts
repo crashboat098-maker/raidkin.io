@@ -102,8 +102,8 @@ const STUCK_CHECK_MS = 900;
 const STUCK_DISTANCE = 4;
 /** Only breadcrumbs this close are considered when re-planning (keeps checks short and cheap). */
 const CRUMB_SEARCH_RADIUS = 220;
-/** Clusters heading back to merge move this much faster than holding ones. */
-const RETURN_BOOST = 1.4;
+/** A group with a smaller one heading back to merge into it slows to this share of its speed. */
+const MERGE_WAIT_SPEED = 0.5;
 /** How often each cluster re-picks its aim along the army's route (ms, staggered). */
 const AIM_REPICK_MS = 250;
 
@@ -391,13 +391,19 @@ export function updatePlayerArmy (
     updateCluster(army.lead, dt, now, obstacles, bounds, settings); // heading + breadcrumbs only (no soldiers)
 
     // Every cluster heads for its target, the clusters push each other into a
-    // blob, then each cluster's soldiers follow it.
-    const blob = blobRadius(army.clusters, settings);
+    // blob, then each cluster's soldiers follow it. A group that a smaller one
+    // is coming back to eases off so it can be caught (instead of the small
+    // one sprinting: a bigger group is never faster than a smaller one).
+    const waitingForChild = new Set<ArmyCluster>();
+    for (const [child, parent] of plan.returning)
+    {
+        // The smaller of the two runs to the bigger one (see clusterTargets): the bigger one waits.
+        waitingForChild.add(child.cluster.warriors.length <= parent.cluster.warriors.length ? parent : child);
+    }
     for (const ac of army.clusters)
     {
         const target = targets.get(ac) ?? army.lead.center.position;
-        const catchingUp = isBehind(ac, army, blob);
-        steerCluster(ac, target, army, plan, armySpeed, catchingUp, dt, now, obstacles, bounds, settings, movement);
+        steerCluster(ac, target, army, armySpeed, waitingForChild.has(ac) ? MERGE_WAIT_SPEED : 1, dt, now, obstacles, bounds, settings, movement);
     }
     packClusters(army, plan, obstacles, bounds, settings);
     for (const ac of army.clusters) updateCluster(ac.cluster, dt, now, obstacles, bounds, settings);
@@ -646,7 +652,7 @@ function leashFactor (army: PlayerArmy, plan: RegroupPlan, targets: Map<ArmyClus
  * stuck. Routes are re-planned a few times a second, not every frame.
  */
 function steerCluster (
-    ac: ArmyCluster, target: Vec2, army: PlayerArmy, plan: RegroupPlan, armySpeed: number, catchingUp: boolean, dt: number, now: number,
+    ac: ArmyCluster, target: Vec2, army: PlayerArmy, armySpeed: number, pace: number, dt: number, now: number,
     obstacles: ObstacleMap, bounds: Rect, settings: PlayerArmySettings, movement: MovementTuning,
 ): void
 {
@@ -700,12 +706,11 @@ function steerCluster (
         ac.launchTarget = null;
     }
     const launching = ac.launchUntil > 0;
-    // Heading back to merge: hurry (as fast as the soldiers can keep up), since
-    // the cluster it merges into keeps marching with the army.
-    const boost = launching ? settings.split.launchBoost : plan.returning.has(ac) ? RETURN_BOOST : 1;
-    // Its own cruising speed; the extra follow speed only to catch up when it has fallen behind.
-    const follow = catchingUp || launching || plan.returning.has(ac) ? settings.split.followSpeedMultiplier : 1;
-    let speed = clusterBaseSpeed(ac, armySpeed, settings, movement) * follow * boost;
+    // Size alone sets a cluster's speed (smaller is quicker), so a bigger group
+    // can never outrun a smaller one. The one exception is the short lunge
+    // right after a split.
+    const boost = launching ? settings.split.launchBoost * settings.split.followSpeedMultiplier : 1;
+    let speed = clusterBaseSpeed(ac, armySpeed, settings, movement) * (launching ? boost : pace);
     // Never outrun its own soldiers (except the short burst right after a split).
     if (!launching) speed = Math.min(speed, settings.warriorSpeed * settings.catchUpMultiplier);
     if (launching) throttle = 1;
