@@ -116,6 +116,68 @@ local Config = {
 		respawnPlayerClearance = 160,
 	},
 
+	-- Combat (from the web's GameConfig.combat; times in seconds). Soldiers fight
+	-- automatically when armies meet: each strikes the nearest enemy in reach.
+	combat = {
+		maxHp = 100,
+		-- Damage per blow, randomly varied by +/- damageVariance.
+		damage = 14,
+		damageVariance = 0.2,
+		-- Melee reach (feet to feet), and time between blows (+/-10%).
+		attackRange = 12,
+		attackInterval = 0.5,
+		-- Soldiers step out to fight enemies within engageRadius of themselves, but
+		-- only ones within engageLeash of their own spot in the formation.
+		engageRadius = 22,
+		engageLeash = 30,
+		-- After this long without dealing or taking damage, an army heals this share of health a second.
+		regenDelay = 60,
+		regenPerSecond = 0.05,
+		-- Archers: less health, shoot arrows from behind the front line.
+		archer = { maxHp = 60, damage = 11, range = 95, attackInterval = 0.9 },
+		-- Split-off groups hit softer when small: { group size, share of damage }.
+		-- 5 soldiers hit at half damage, 25 or more at full. The main group always hits at full.
+		clusterDamage = { { 5, 0.5 }, { 25, 1 } },
+	},
+
+	-- Fallen soldiers leave a body; after `dormant` seconds any army can revive it
+	-- by walking a soldier within reviveRange. Unclaimed bodies fade after `lifetime`.
+	fallen = {
+		dormant = 5,
+		lifetime = 180,
+		reviveRange = 20,
+	},
+
+	-- AI armies that play by the same rules as players (from the web's GameConfig.bots).
+	bots = {
+		names = { "KARWYN", "VELVASH", "VORHELM" },
+		-- Their army colours (indexes into `colors`), and the most soldiers each grows to.
+		colors = { 2, 3, 5 },
+		maxSoldiers = { 65, 150, 50 },
+		-- Beaten bots come back as one soldier after this many seconds.
+		respawnDelay = 8,
+		-- How far a bot notices armies, shards and recruits, and how often it re-thinks.
+		sightRadius = 300,
+		decisionInterval = 0.4,
+		-- Hunt armies we're this many times stronger than; fight ones at least this
+		-- share of us; flee from ones this many times stronger (strength = total health).
+		huntRatio = 1.3,
+		engageRatio = 0.85,
+		fleeRatio = 1.5,
+		-- Below this average health a bot avoids even fights.
+		injuredHealthRatio = 0.5,
+		fleeDuration = 4,
+		-- Armies this big look for prey beyond their sight, this far.
+		huntMinSize = 10,
+		huntSearchRadius = 900,
+		-- A chase that hasn't closed the gap for this long is dropped, and that army ignored for a while.
+		pursuitGiveUp = 7,
+		pursuitIgnore = 15,
+	},
+
+	-- New and respawning armies start at least this far from any other army.
+	spawnClearance = 360,
+
 	-- Neutral (unrecruited) soldiers are drawn in this colour.
 	neutralColor = Color3.fromRGB(150, 140, 120),
 

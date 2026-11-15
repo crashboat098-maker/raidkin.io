@@ -1,7 +1,8 @@
 --!strict
 -- An army: soldiers gathered in a round "sunflower" formation around an
 -- invisible steering point that the player moves. Ported from the web's
--- Army.ts (one cluster, open ground; splitting, obstacles and combat come later).
+-- Army.ts (one group, open ground; see PlayerArmy for splitting, and the
+-- server's Combat for fighting).
 
 local Movement = require(script.Parent.Movement)
 
@@ -22,6 +23,15 @@ export type Soldier = {
 	-- Which way it faces (radians; Roblox yaw, so models can be turned with CFrame.Angles(0, yaw, 0)).
 	yaw: number,
 	moving: boolean,
+
+	-- Combat (see the server's Combat).
+	hp: number,
+	maxHp: number,
+	-- Earliest time this soldier can strike again (seconds, server clock).
+	nextAttackAt: number,
+	-- An enemy to step toward and fight this update (nil = keep formation).
+	engageX: number?,
+	engageZ: number?,
 }
 
 export type Army = {
@@ -48,6 +58,8 @@ export type Settings = {
 local SETTLE_RATE = 10
 -- A soldier this far from its spot counts as fallen behind and may run faster.
 local FAR_BEHIND = 48
+-- Fighting soldiers stop this close to their enemy (inside striking range).
+local ENGAGE_STANDOFF = 8
 
 -- ---------------------------------------------------------------------------
 -- Formation
@@ -132,7 +144,7 @@ function Army.new(id: number, colorIndex: number, x: number, z: number): Army
 end
 
 -- Add a soldier at (x, z); it takes the first free formation spot (the outer edge).
-function Army.addSoldier(army: Army, id: number, x: number, z: number, role: Role?): Soldier
+function Army.addSoldier(army: Army, id: number, x: number, z: number, role: Role?, maxHp: number?): Soldier
 	local used: { [number]: boolean } = {}
 	for _, s in army.soldiers do
 		used[s.slot] = true
@@ -141,7 +153,23 @@ function Army.addSoldier(army: Army, id: number, x: number, z: number, role: Rol
 	while used[slot] do
 		slot += 1
 	end
-	local soldier: Soldier = { id = id, role = role or "warrior", slot = slot, x = x, z = z, vx = 0, vz = 0, yaw = 0, moving = false }
+	local hp = maxHp or 100
+	local soldier: Soldier = {
+		id = id,
+		role = role or "warrior",
+		slot = slot,
+		x = x,
+		z = z,
+		vx = 0,
+		vz = 0,
+		yaw = 0,
+		moving = false,
+		hp = hp,
+		maxHp = hp,
+		nextAttackAt = 0,
+		engageX = nil,
+		engageZ = nil,
+	}
 	table.insert(army.soldiers, soldier)
 	return soldier
 end
@@ -246,40 +274,60 @@ function Army.updateSoldiers(army: Army, dt: number, settings: Settings)
 		end
 		local tx = center.x + slot.X
 		local tz = center.z + slot.Y
-		local toX, toZ = tx - soldier.x, tz - soldier.z
+		local slotDistance = math.sqrt((tx - soldier.x) ^ 2 + (tz - soldier.z) ^ 2)
+
+		-- In a fight, step toward the enemy instead (Combat keeps this close to the spot).
+		local ex, ez = soldier.engageX, soldier.engageZ
+		local engaged = ex ~= nil and ez ~= nil
+		local gx, gz = tx, tz
+		if ex and ez then
+			gx, gz = ex, ez
+		end
+		local toX, toZ = gx - soldier.x, gz - soldier.z
 		local distance = math.sqrt(toX * toX + toZ * toZ)
 
-		-- 2. How fast? Close the gap firmly, slowing to a stop on the spot.
-		local topSpeed = settings.warriorSpeed * (if distance > FAR_BEHIND then settings.catchUpMultiplier else 1)
-		local speed = if distance < 2.5 then 0 else math.min(topSpeed, distance * SETTLE_RATE)
+		-- 2. How fast? Close the gap firmly, slowing to a stop on the spot (or at
+		-- striking distance from the enemy).
+		local topSpeed = settings.warriorSpeed * (if slotDistance > FAR_BEHIND then settings.catchUpMultiplier else 1)
+		local speed
+		if engaged then
+			speed = if distance < ENGAGE_STANDOFF then 0 else math.min(topSpeed, (distance - ENGAGE_STANDOFF) * 6 + 12)
+		else
+			speed = if distance < 2.5 then 0 else math.min(topSpeed, distance * SETTLE_RATE)
+		end
 		local desiredX = if distance > 0.01 then toX / distance * speed else 0
 		local desiredZ = if distance > 0.01 then toZ / distance * speed else 0
 
-		-- Move WITH the steering point, plus the correction toward the spot (otherwise
-		-- soldiers only chase their spot and trail behind it).
-		desiredX += center.vx
-		desiredZ += center.vz
-		local cap = topSpeed * settings.catchUpMultiplier
-		local desiredSpeed = math.sqrt(desiredX * desiredX + desiredZ * desiredZ)
-		if desiredSpeed > cap then
-			desiredX *= cap / desiredSpeed
-			desiredZ *= cap / desiredSpeed
+		if not engaged then
+			-- Move WITH the steering point, plus the correction toward the spot (otherwise
+			-- soldiers only chase their spot and trail behind it).
+			desiredX += center.vx
+			desiredZ += center.vz
+			local cap = topSpeed * settings.catchUpMultiplier
+			local desiredSpeed = math.sqrt(desiredX * desiredX + desiredZ * desiredZ)
+			if desiredSpeed > cap then
+				desiredX *= cap / desiredSpeed
+				desiredZ *= cap / desiredSpeed
+			end
 		end
 
-		-- 3. Personal space.
+		-- 3. Personal space (much weaker in a fight, so soldiers can press in).
 		local pushX, pushZ = separation(soldier, army.soldiers, settings.separationDistance)
-		desiredX += pushX * topSpeed
-		desiredZ += pushZ * topSpeed
+		local push = if engaged then 0.25 else 1
+		desiredX += pushX * topSpeed * push
+		desiredZ += pushZ * topSpeed * push
 
 		-- 4. Turn to the desired direction at once; only the speed eases.
 		soldier.vx, soldier.vz = Movement.steerVelocity(soldier.vx, soldier.vz, desiredX, desiredZ, settings.warriorAcceleration * dt)
 		soldier.x += soldier.vx * dt
 		soldier.z += soldier.vz * dt
 
-		-- 5. Marching soldiers all face the way the army is steered, the instant it
-		-- turns; otherwise they face the way they walk.
+		-- 5. Fighters face their foe; marching soldiers all face the way the army is
+		-- steered, the instant it turns; otherwise they face the way they walk.
 		local ownSpeed = math.sqrt(soldier.vx * soldier.vx + soldier.vz * soldier.vz)
-		if centerSpeed > 3 then
+		if engaged and distance > 0.01 then
+			soldier.yaw = yawToward(toX, toZ)
+		elseif centerSpeed > 3 then
 			soldier.yaw = yawToward(center.vx, center.vz)
 		elseif ownSpeed > 3 then
 			soldier.yaw = yawToward(soldier.vx, soldier.vz)

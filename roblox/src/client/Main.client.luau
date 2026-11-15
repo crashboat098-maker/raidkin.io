@@ -17,22 +17,51 @@ local Config = require(Shared:WaitForChild("Config"))
 local Version = require(Shared:WaitForChild("Version"))
 local ArmyView = require(script.Parent:WaitForChild("ArmyView"))
 local ShardView = require(script.Parent:WaitForChild("ShardView"))
+local BodyView = require(script.Parent:WaitForChild("BodyView"))
+local NameView = require(script.Parent:WaitForChild("NameView"))
 local Hud = require(script.Parent:WaitForChild("Hud"))
 
-local player = Players.LocalPlayer
 local camera = Workspace.CurrentCamera
 local remotes = ReplicatedStorage:WaitForChild("Remotes")
 local steerRemote = remotes:WaitForChild("Steer") :: RemoteEvent
 local snapshotRemote = remotes:WaitForChild("Snapshot") :: RemoteEvent
 local shardRemote = remotes:WaitForChild("ShardSync") :: RemoteEvent
+local bodiesRemote = remotes:WaitForChild("Bodies") :: RemoteEvent
 local statsRemote = remotes:WaitForChild("Stats") :: RemoteEvent
+local boardRemote = remotes:WaitForChild("Board") :: RemoteEvent
+local defeatRemote = remotes:WaitForChild("Defeat") :: RemoteEvent
+local respawnRemote = remotes:WaitForChild("Respawn") :: RemoteEvent
 
--- Shards: every one once (asked for below, now that we're listening), then changes.
+-- Which army is ours (the server tells us with our stats), and every army's name.
+local myId: number? = nil
+local names: { [number]: string } = {}
+local lastBoard: { Hud.BoardRow } = {}
+
+-- Shards and bodies: everything once (asked for below, now that we're listening), then changes.
 shardRemote.OnClientEvent:Connect(function(message)
 	ShardView.apply(message.shards)
 end)
+bodiesRemote.OnClientEvent:Connect(function(message)
+	BodyView.apply(message)
+end)
 statsRemote.OnClientEvent:Connect(function(stats)
+	if myId ~= stats.myId then
+		myId = stats.myId
+		Hud.showBoard(lastBoard, myId)
+	end
 	Hud.show(stats)
+end)
+boardRemote.OnClientEvent:Connect(function(rows)
+	lastBoard = rows
+	for _, row in rows do
+		names[row.id] = row.name
+	end
+	Hud.showBoard(rows, myId)
+end)
+defeatRemote.OnClientEvent:Connect(function(info)
+	Hud.showDefeat(info, function()
+		respawnRemote:FireServer()
+	end)
 end)
 shardRemote:FireServer()
 
@@ -45,14 +74,21 @@ local S = Config.STUDS_PER_PX
 type Snapshot = { t: number, armies: { ArmyView.ArmyState } }
 local snapshots: { Snapshot } = {}
 
--- Unpacks the server's flat soldier lists ({ id, x, z, yaw, moving, archer, ... }).
+-- Unpacks the server's flat soldier lists ({ id, x, z, yaw, moving, archer, health, ... }).
 snapshotRemote.OnClientEvent:Connect(function(message)
 	local armies = {}
 	for _, a in message.armies do
 		local soldiers: { [number]: ArmyView.SoldierState } = {}
 		local flat = a.soldiers
-		for i = 1, #flat, 6 do
-			soldiers[flat[i]] = { x = flat[i + 1], z = flat[i + 2], yaw = flat[i + 3], moving = flat[i + 4] == 1, archer = flat[i + 5] == 1 }
+		for i = 1, #flat, 7 do
+			soldiers[flat[i]] = {
+				x = flat[i + 1],
+				z = flat[i + 2],
+				yaw = flat[i + 3],
+				moving = flat[i + 4] == 1,
+				archer = flat[i + 5] == 1,
+				health = flat[i + 6],
+			}
 		end
 		table.insert(armies, { id = a.id, color = a.color, cx = a.cx, cz = a.cz, soldiers = soldiers })
 	end
@@ -89,7 +125,7 @@ local function blendedArmies(renderTime: number): { ArmyView.ArmyState }
 		for id, s in army.soldiers do
 			local p = prev and prev.soldiers[id]
 			if p then
-				soldiers[id] = { x = p.x + (s.x - p.x) * a, z = p.z + (s.z - p.z) * a, yaw = s.yaw, moving = s.moving, archer = s.archer }
+				soldiers[id] = { x = p.x + (s.x - p.x) * a, z = p.z + (s.z - p.z) * a, yaw = s.yaw, moving = s.moving, archer = s.archer, health = s.health }
 			else
 				soldiers[id] = s
 			end
@@ -205,12 +241,13 @@ RunService.RenderStepped:Connect(function(dt)
 	local armies = blendedArmies(Workspace:GetServerTimeNow() - Config.INTERPOLATION_S)
 	local mine: ArmyView.ArmyState? = nil
 	for _, army in armies do
-		if army.id == player.UserId then
+		if army.id == myId then
 			mine = army
 		end
 	end
 	updateCamera(mine, dt)
 	ArmyView.draw(armies, now)
+	NameView.draw(armies, names)
 end)
 
 print(`[{Version.name}] client ready, version {Version.version}`)
