@@ -78,8 +78,18 @@ local flat = Map.numbers(data.obstacles)
 for i = 1, #flat, 4 do
 	table.insert(rects, { x = flat[i], z = flat[i + 1], w = flat[i + 2], h = flat[i + 3] })
 end
+-- Route-planning cost of lava (dry ground is 1), and how much worse than it
+-- really is water counts (it's slow, and soldiers fight badly knee-deep), so
+-- armies take a nearby bridge, like people would, and only wade when it's far.
+local LAVA_COST = 12
+local WATER_DISLIKE = 3
 Map.obstacles = Obstacles.new(rects, function(x, z)
 	return if fineAt(water, x, z) then Config.water.slowdown else 1
+end, function(x, z)
+	if fineAt(lava, x, z) then
+		return LAVA_COST
+	end
+	return if fineAt(water, x, z) then WATER_DISLIKE / Config.water.slowdown else 1
 end)
 
 -- Tiles where things (shards, wanderers, new armies) may appear: open ground,

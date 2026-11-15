@@ -85,8 +85,6 @@ local Config = {
 		},
 		-- If the bulk of the army falls this far behind the steering point, it slows down for them.
 		leash = { startDistance = 36, fullStopDistance = 140 },
-		-- When you steer, groups head for a point this far ahead of the army.
-		lookahead = 360,
 	},
 
 	-- Soul shards: the collectible resource (from the web's GameConfig.soulShards).

@@ -20,6 +20,7 @@ local Config = require(script.Parent.Config)
 local Movement = require(script.Parent.Movement)
 local Army = require(script.Parent.Army)
 local Obstacles = require(script.Parent.Obstacles)
+local Navigation = require(script.Parent.Navigation)
 
 local PlayerArmy = {}
 
@@ -83,6 +84,28 @@ export type ArmyCluster = {
 	launchUntil: number,
 	launchX: number,
 	launchZ: number,
+	-- How its centre finds its way to its place in the army (re-planned a few times a second).
+	route: FollowRoute,
+	nextPlanAt: number,
+	-- Its own aim along the army's route (re-picked a few times a second).
+	aim: Vector2?,
+	nextAimAt: number,
+	-- Stuck detection: where it was at the last check, and when to check next.
+	lastCheckX: number,
+	lastCheckZ: number,
+	nextStuckCheckAt: number,
+}
+
+--[[
+	How a group's centre gets to its place: straight there; along the lead's
+	breadcrumbs (`index` counted from when the plan was made, `shifts` = how many
+	crumbs had dropped off the trail then); or a detour around something.
+]]
+export type FollowRoute = {
+	mode: "direct" | "trail" | "detour",
+	index: number,
+	shifts: number,
+	points: { Vector2 }?,
 }
 
 export type PlayerArmy = {
@@ -92,8 +115,11 @@ export type PlayerArmy = {
 	lead: Movement.Mover,
 	headingX: number,
 	headingZ: number,
-	-- Where the player is steering to (a point ahead of the lead), or nil when standing still.
-	goal: Vector2?,
+	-- The lead's route around obstacles toward where the player steers (its goal: nil when standing still).
+	nav: Navigation.Navigator,
+	-- The lead's recent positions, oldest first, and how many have dropped off the front.
+	trail: { Vector2 },
+	trailShifts: number,
 	clusters: { ArmyCluster },
 	nextClusterId: number,
 	-- Every group id ever made -> its parent id (0 = none), so returning groups can skip parents that are gone.
@@ -109,7 +135,21 @@ type Plan = {
 }
 
 local function wrap(cluster: Army.Army, parentId: number, splitAt: number): ArmyCluster
-	return { cluster = cluster, parentId = parentId, splitAt = splitAt, launchUntil = 0, launchX = 0, launchZ = 0 }
+	return {
+		cluster = cluster,
+		parentId = parentId,
+		splitAt = splitAt,
+		launchUntil = 0,
+		launchX = 0,
+		launchZ = 0,
+		route = { mode = "direct", index = 1, shifts = 0, points = nil },
+		nextPlanAt = 0,
+		aim = nil,
+		nextAimAt = 0,
+		lastCheckX = cluster.center.x,
+		lastCheckZ = cluster.center.z,
+		nextStuckCheckAt = 0,
+	}
 end
 
 function PlayerArmy.new(id: number, colorIndex: number, x: number, z: number): PlayerArmy
@@ -119,7 +159,9 @@ function PlayerArmy.new(id: number, colorIndex: number, x: number, z: number): P
 		lead = Movement.create(x, z),
 		headingX = 0,
 		headingZ = 1,
-		goal = nil,
+		nav = Navigation.newNavigator(),
+		trail = {},
+		trailShifts = 0,
 		clusters = { wrap(Army.new(1, colorIndex, x, z), 0, -math.huge) },
 		nextClusterId = 2,
 		parentOf = { [1] = 0 },
@@ -304,12 +346,6 @@ function PlayerArmy.canSplit(army: PlayerArmy, now: number): boolean
 	return false
 end
 
-local function clampToWorld(x: number, z: number): (number, number)
-	local m = Config.world.margin
-	local size = Config.world.size
-	return math.clamp(x, m, size - m), math.clamp(z, m, size - m)
-end
-
 --[[
 	SPACE: split every group that has enough soldiers into two halves. The front
 	half (toward `aimX, aimZ`, where the player points) breaks off and shoots
@@ -417,28 +453,70 @@ local function isBehind(ac: ArmyCluster, army: PlayerArmy, blob: number): boolea
 	if math.sqrt(dx * dx + dz * dz) <= blob then
 		return false
 	end
-	local goal = army.goal
+	local goal = army.nav.goal
 	if not goal then
 		return true
 	end
 	return dx * (goal.X - lead.x) + dz * (goal.Y - lead.z) < 0
 end
 
+-- How often each group re-picks its aim along the army's route (seconds, staggered).
+local AIM_REPICK = 0.25
+
+--[[
+	Where a holding group heads: straight for the player's goal if it can walk
+	there, else the furthest point of the army's route it can walk straight to
+	(so a group that lunged ahead never turns back for a waypoint it has already
+	passed). The steering point when standing still, or when nothing on the route
+	is in a straight line (the group then follows the army's footsteps).
+]]
+local function aimFor(ac: ArmyCluster, army: PlayerArmy, now: number): Vector2
+	local lead = Vector2.new(army.lead.x, army.lead.z)
+	local nav = army.nav
+	local goal = nav.goal
+	if not goal then
+		ac.aim = nil
+		return lead
+	end
+	local current = ac.aim
+	if current and now < ac.nextAimAt then
+		return current
+	end
+	local c = ac.cluster.center
+	local aim = lead
+	if #nav.path == 0 then
+		aim = goal -- the army's own way there is straight
+	elseif not nav.partial and Navigation.hasDryPath(world, c.x, c.z, goal.X, goal.Y) then
+		aim = goal
+	else
+		for k = #nav.path, nav.index, -1 do
+			local p = nav.path[k]
+			if Navigation.hasClearPath(world, c.x, c.z, p.X, p.Y) then
+				aim = p
+				break
+			end
+		end
+	end
+	ac.aim = aim
+	ac.nextAimAt = now + AIM_REPICK * (0.8 + (ac.cluster.id % 5) / 10)
+	return aim
+end
+
 --[[
 	Where each group heads, like agar.io cells: holding groups head for where
-	the player steers (or the lead when standing still); a freshly split group
-	first shoots out to its launch point; when regrouping, the smaller group runs
-	back to the bigger one, which holds its place.
+	the player steers, along the army's route (or the lead when standing still);
+	a freshly split group first shoots out to its launch point; when regrouping,
+	the smaller group runs back to the bigger one, which holds its place.
 ]]
-local function clusterTargets(army: PlayerArmy, plan: Plan): { [ArmyCluster]: Vector2 }
+local function clusterTargets(army: PlayerArmy, plan: Plan, now: number): { [ArmyCluster]: Vector2 }
 	local targets: { [ArmyCluster]: Vector2 } = {}
 	local lead = Vector2.new(army.lead.x, army.lead.z)
-	local goal = army.goal or lead
+	local goal = Navigation.goalOf(army.nav) or lead
 	for _, ac in plan.holding do
 		if ac.launchUntil > 0 then
 			targets[ac] = Vector2.new(ac.launchX, ac.launchZ)
 		else
-			targets[ac] = goal
+			targets[ac] = aimFor(ac, army, now)
 		end
 	end
 	for ac, parent in plan.returning do
@@ -501,11 +579,101 @@ local function leashFactor(army: PlayerArmy, plan: Plan, targets: { [ArmyCluster
 end
 
 -- Move a group's centre toward its target, easing off as it arrives.
-local function steerCluster(ac: ArmyCluster, target: Vector2, armySpeed: number, pace: number, dt: number, now: number, bounds: Movement.Bounds)
+-- How often a group re-plans its way, how often it checks for being stuck, and
+-- how little movement counts as stuck. Only breadcrumbs this close are considered.
+local REPLAN = 0.3
+local STUCK_CHECK = 0.9
+local STUCK_DISTANCE = 4
+local CRUMB_SEARCH_RADIUS = 220
+
+local function dist(ax: number, az: number, bx: number, bz: number): number
+	return math.sqrt((ax - bx) ^ 2 + (az - bz) ^ 2)
+end
+
+--[[
+	The cheapest way for a group's centre to reach its target: straight there if
+	the way is dry and clear; else the newest of the lead's breadcrumbs it can
+	walk straight to (the army just walked them, so they're known to be clear);
+	else straight (sliding along) until a stuck check finds a detour.
+]]
+local function planFollow(army: PlayerArmy, x: number, z: number, target: Vector2, current: FollowRoute): FollowRoute
+	if Navigation.hasDryPath(world, x, z, target.X, target.Y) then
+		return { mode = "direct", index = 1, shifts = 0, points = nil }
+	end
+	-- Keep following a detour that's still in progress.
+	if current.mode == "detour" and current.points and current.index <= #current.points then
+		return current
+	end
+	-- The newest breadcrumb we can walk straight to, dry ones first (the lead's
+	-- footsteps go round walls and over bridges). Never one further from the target
+	-- than we already are (e.g. behind a group that lunged ahead).
+	local trail = army.trail
+	local toGo = dist(x, z, target.X, target.Y)
+	local wetCrumb = -1
+	for i = #trail, 1, -1 do
+		local crumb = trail[i]
+		if dist(crumb.X, crumb.Y, x, z) <= CRUMB_SEARCH_RADIUS and dist(crumb.X, crumb.Y, target.X, target.Y) < toGo
+			and Navigation.hasClearPath(world, x, z, crumb.X, crumb.Y)
+		then
+			if not Navigation.wadesBetween(world, x, z, crumb.X, crumb.Y) then
+				return { mode = "trail", index = i, shifts = army.trailShifts, points = nil }
+			end
+			if wetCrumb < 0 then
+				wetCrumb = i
+			end
+		end
+	end
+	if Navigation.hasClearPath(world, x, z, target.X, target.Y) then
+		return { mode = "direct", index = 1, shifts = 0, points = nil }
+	end
+	if wetCrumb > 0 then
+		return { mode = "trail", index = wetCrumb, shifts = army.trailShifts, points = nil }
+	end
+	if current.mode == "trail" then
+		return current
+	end
+	return { mode = "direct", index = 1, shifts = 0, points = nil }
+end
+
+local function steerCluster(army: PlayerArmy, ac: ArmyCluster, target: Vector2, armySpeed: number, pace: number, dt: number, now: number, bounds: Movement.Bounds)
 	local c = ac.cluster.center
-	local dx, dz = target.X - c.x, target.Y - c.z
+
+	-- Which way? Re-planned a few times a second, staggered.
+	if now >= ac.nextPlanAt then
+		ac.route = planFollow(army, c.x, c.z, target, ac.route)
+		ac.nextPlanAt = now + REPLAN * (0.8 + (ac.cluster.id % 5) / 10)
+	end
+	local goalX, goalZ = target.X, target.Y
+	local arriving = true
+	local route = ac.route
+	if route.mode == "trail" then
+		-- The trail may have lost crumbs off its front since the plan was made.
+		local index = route.index - (army.trailShifts - route.shifts)
+		local crumb = army.trail[math.max(1, index)]
+		if not crumb or index > #army.trail then
+			ac.route = { mode = "direct", index = 1, shifts = 0, points = nil }
+		else
+			goalX, goalZ, arriving = crumb.X, crumb.Y, false
+			if dist(c.x, c.z, crumb.X, crumb.Y) < 8 then
+				route.index += 1
+			end
+		end
+	elseif route.mode == "detour" then
+		local point = route.points and route.points[route.index]
+		if not point then
+			ac.route = { mode = "direct", index = 1, shifts = 0, points = nil }
+		else
+			goalX, goalZ, arriving = point.X, point.Y, false
+			if dist(c.x, c.z, point.X, point.Y) < 6 then
+				route.index += 1
+			end
+		end
+	end
+
+	-- Head for the goal, easing off near the target so groups settle smoothly.
+	local dx, dz = goalX - c.x, goalZ - c.z
 	local d = math.sqrt(dx * dx + dz * dz)
-	local throttle = math.min(1, d / 16)
+	local throttle = if arriving then math.min(1, d / 16) else 1
 	if d > 0.5 then
 		dx /= d
 		dz /= d
@@ -514,7 +682,7 @@ local function steerCluster(ac: ArmyCluster, target: Vector2, armySpeed: number,
 	end
 
 	-- Freshly split: shoot out to the launch point, then fall back into the blob.
-	if ac.launchUntil > 0 and (now >= ac.launchUntil or d < 10) then
+	if ac.launchUntil > 0 and (now >= ac.launchUntil or (arriving and d < 10)) then
 		ac.launchUntil = 0
 	end
 	local launching = ac.launchUntil > 0
@@ -531,6 +699,23 @@ local function steerCluster(ac: ArmyCluster, target: Vector2, armySpeed: number,
 		acceleration = Config.movement.acceleration,
 		deceleration = Config.movement.deceleration,
 	}, bounds, world)
+
+	-- Stuck? Find a way round: a short local search first, then a wider route search
+	-- (e.g. along a river to its bridge).
+	if now >= ac.nextStuckCheckAt then
+		if dist(c.x, c.z, ac.lastCheckX, ac.lastCheckZ) < STUCK_DISTANCE and dist(c.x, c.z, target.X, target.Y) > 24 then
+			local detour = Navigation.findDetour(world, bounds, c.x, c.z, target.X, target.Y)
+			if not detour then
+				detour = Navigation.findPath(world, bounds, c.x, c.z, target.X, target.Y)
+			end
+			if detour and #detour > 0 then
+				ac.route = { mode = "detour", index = 1, shifts = 0, points = detour }
+				ac.nextPlanAt = now + 1.5
+			end
+		end
+		ac.lastCheckX, ac.lastCheckZ = c.x, c.z
+		ac.nextStuckCheckAt = now + STUCK_CHECK
+	end
 end
 
 --[[
@@ -619,6 +804,7 @@ local function mergeReturning(army: PlayerArmy, plan: Plan): number
 	if merges > 0 and #army.clusters == 1 then
 		local c = army.clusters[1].cluster.center
 		army.lead.x, army.lead.z = c.x, c.z
+		army.nav.nextPlanAt = 0 -- its route was planned from where it stood
 	end
 	return merges
 end
@@ -639,21 +825,14 @@ function PlayerArmy.update(army: PlayerArmy, steerX: number, steerZ: number, dt:
 	end
 	repairFamily(army)
 
-	-- Where the player is steering: a point ahead of the lead, or nowhere.
-	local strength = math.sqrt(steerX * steerX + steerZ * steerZ)
-	if strength > 0.01 then
-		local gx, gz = clampToWorld(army.lead.x + steerX / strength * settings.lookahead, army.lead.z + steerZ / strength * settings.lookahead)
-		army.goal = Vector2.new(gx, gz)
-	else
-		army.goal = nil
-	end
-
 	local plan = planRegroup(army, now)
 	local armySpeed = PlayerArmy.armySpeed(army)
-	local targets = clusterTargets(army, plan)
+	local targets = clusterTargets(army, plan, now)
 
 	-- The lead: player-steered, at the largest group's speed, slowed if the army lags.
-	Movement.update(army.lead, steerX, steerZ, dt, {
+	-- It walks a route around obstacles toward where the player points.
+	local sx, sz = Navigation.steerAround(army.nav, world, bounds, army.lead.x, army.lead.z, steerX, steerZ, now)
+	Movement.update(army.lead, sx, sz, dt, {
 		maxSpeed = armySpeed * leashFactor(army, plan, targets),
 		acceleration = Config.movement.acceleration,
 		deceleration = Config.movement.deceleration,
@@ -661,6 +840,15 @@ function PlayerArmy.update(army: PlayerArmy, steerX: number, steerZ: number, dt:
 	local leadSpeed = math.sqrt(army.lead.vx ^ 2 + army.lead.vz ^ 2)
 	if leadSpeed >= 10 then
 		army.headingX, army.headingZ = army.lead.vx / leadSpeed, army.lead.vz / leadSpeed
+	end
+	-- The lead's breadcrumbs: groups that lose sight of their place follow them.
+	local last = army.trail[#army.trail]
+	if not last or dist(last.X, last.Y, army.lead.x, army.lead.z) >= 10 then
+		table.insert(army.trail, Vector2.new(army.lead.x, army.lead.z))
+		if #army.trail > 200 then
+			table.remove(army.trail, 1)
+			army.trailShifts += 1
+		end
 	end
 
 	-- A group that a smaller one is coming back to eases off so it can be caught.
@@ -670,11 +858,12 @@ function PlayerArmy.update(army: PlayerArmy, steerX: number, steerZ: number, dt:
 	end
 	for _, ac in army.clusters do
 		local target = targets[ac] or Vector2.new(army.lead.x, army.lead.z)
-		steerCluster(ac, target, armySpeed, if waitingForChild[ac] then MERGE_WAIT_SPEED else 1, dt, now, bounds)
+		steerCluster(army, ac, target, armySpeed, if waitingForChild[ac] then MERGE_WAIT_SPEED else 1, dt, now, bounds)
 	end
 	packClusters(army, plan, bounds)
+	local ground: Army.Ground = { obstacles = world, bounds = bounds, now = now }
 	for _, ac in army.clusters do
-		Army.updateSoldiers(ac.cluster, dt, settings, world)
+		Army.updateSoldiers(ac.cluster, dt, settings, ground)
 	end
 
 	return mergeReturning(army, plan)

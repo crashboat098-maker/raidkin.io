@@ -25,6 +25,9 @@ export type Obstacles = {
 	blockedAt: (x: number, z: number, halfWidth: number, depth: number) -> boolean,
 	-- Speed multiplier for something standing at (x, z) (slower in water).
 	speedFactorAt: (x: number, z: number) -> number,
+	-- How costly walking over (x, z) is when planning a route: 1 on dry ground or
+	-- a bridge, more in water (slow) and much more in lava (it burns).
+	travelCost: (x: number, z: number) -> number,
 }
 
 local CELL = 64
@@ -47,10 +50,13 @@ function Obstacles.none(): Obstacles
 		speedFactorAt = function()
 			return 1
 		end,
+		travelCost = function()
+			return 1
+		end,
 	}
 end
 
-function Obstacles.new(rects: { Rect }, speedFactorAt: ((number, number) -> number)?): Obstacles
+function Obstacles.new(rects: { Rect }, speedFactorAt: ((number, number) -> number)?, travelCost: ((number, number) -> number)?): Obstacles
 	local cells: { [number]: { Rect } } = {}
 
 	local function forEachCell(x: number, z: number, w: number, h: number, fn: (key: number) -> ())
@@ -119,6 +125,9 @@ function Obstacles.new(rects: { Rect }, speedFactorAt: ((number, number) -> numb
 			return false
 		end,
 		speedFactorAt = speedFactorAt or function()
+			return 1
+		end,
+		travelCost = travelCost or function()
 			return 1
 		end,
 	}

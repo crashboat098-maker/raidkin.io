@@ -6,8 +6,24 @@
 
 local Movement = require(script.Parent.Movement)
 local Obstacles = require(script.Parent.Obstacles)
+local Navigation = require(script.Parent.Navigation)
 
 local Army = {}
+
+--[[
+	How a soldier gets to its spot, cheapest first: straight to the spot when
+	the way is clear; to the group's centre if something's in the way; back along
+	the centre's recent path ("breadcrumbs", known to be walkable) if even that
+	is blocked; and only if nothing is in sight, or it gets stuck, a small grid
+	search for a detour. One shared trail per group is far cheaper than a
+	pathfinder per soldier.
+]]
+export type Route = {
+	mode: "slot" | "center" | "crumb" | "detour",
+	-- Which breadcrumb (crumb) or waypoint (detour) it's heading for.
+	index: number,
+	points: { Vector2 }?,
+}
 
 -- Melee Warriors, and Archers who keep to the back of the formation.
 export type Role = "warrior" | "archer"
@@ -33,6 +49,16 @@ export type Soldier = {
 	-- An enemy to step toward and fight this update (nil = keep formation).
 	engageX: number?,
 	engageZ: number?,
+
+	-- Finding the way (see Route): the current plan and when to re-plan it, when
+	-- it was last checked for being stuck (and where it was), and since when it's
+	-- been badly separated from its group (0 = not).
+	route: Route,
+	nextThinkAt: number,
+	nextStuckCheckAt: number,
+	lastCheckX: number,
+	lastCheckZ: number,
+	lostSince: number,
 }
 
 export type Army = {
@@ -43,6 +69,8 @@ export type Army = {
 	-- Direction of travel (unit vector).
 	headingX: number,
 	headingZ: number,
+	-- The centre's recent positions, oldest first (breadcrumbs for soldiers who lose sight of it).
+	trail: { Vector2 },
 }
 
 export type Settings = {
@@ -141,6 +169,7 @@ function Army.new(id: number, colorIndex: number, x: number, z: number): Army
 		soldiers = {},
 		headingX = 0,
 		headingZ = 1,
+		trail = {},
 	}
 end
 
@@ -170,6 +199,12 @@ function Army.addSoldier(army: Army, id: number, x: number, z: number, role: Rol
 		nextAttackAt = 0,
 		engageX = nil,
 		engageZ = nil,
+		route = { mode = "slot", index = 1, points = nil },
+		nextThinkAt = 0,
+		nextStuckCheckAt = 0,
+		lastCheckX = x,
+		lastCheckZ = z,
+		lostSince = 0,
 	}
 	table.insert(army.soldiers, soldier)
 	return soldier
@@ -214,6 +249,9 @@ function Army.reassignSlots(army: Army, spacing: number)
 		local soldier = table.remove(unassigned, bestIndex)
 		if soldier then
 			soldier.slot = i
+			-- A new spot: plan a fresh way to it.
+			soldier.route = { mode = "slot", index = 1, points = nil }
+			soldier.nextThinkAt = 0
 		end
 	end
 end
@@ -252,12 +290,160 @@ local function yawToward(dx: number, dz: number): number
 	return math.atan2(-dx, -dz)
 end
 
+-- ---------------------------------------------------------------------------
+-- Finding the way (see the file comment on Route)
+-- ---------------------------------------------------------------------------
+
+-- Soldier detour searches allowed per update, across every army: a big battle
+-- jams hundreds of soldiers at once, and searching for all of them in one update
+-- would stall the server. The rest simply try again later.
+local DETOUR_SEARCHES_PER_UPDATE = 3
+-- A soldier's detour search gives up after this many grid cells.
+local SOLDIER_DETOUR_VISITS = 2500
+-- How often to check whether a travelling soldier is stuck, and how little movement counts as stuck.
+local STUCK_CHECK = 0.9
+local STUCK_DISTANCE = 4
+-- Soldiers heading for the centre (not yet in formation) stop this close to it.
+local CENTER_STANDOFF = 10
+-- How often each soldier re-plans its route (seconds), staggered across soldiers.
+local THINK_INTERVAL = 0.22
+-- Breadcrumbs: the centre's recent path, one every TRAIL_SPACING px, the last TRAIL_LENGTH of them.
+local TRAIL_SPACING = 10
+local TRAIL_LENGTH = 200
+-- A soldier this far from the centre for this long is put back near it (should be rare).
+local RECOVER_DISTANCE = 260
+local RECOVER_AFTER = 6
+
+local detourBudgetAt = -1
+local detourBudgetLeft = 0
+local function takeDetourSearch(now: number): boolean
+	if now ~= detourBudgetAt then
+		detourBudgetAt = now
+		detourBudgetLeft = DETOUR_SEARCHES_PER_UPDATE
+	end
+	if detourBudgetLeft <= 0 then
+		return false
+	end
+	detourBudgetLeft -= 1
+	return true
+end
+
+local function dist(ax: number, az: number, bx: number, bz: number): number
+	return math.sqrt((ax - bx) ^ 2 + (az - bz) ^ 2)
+end
+
+-- Drop a breadcrumb where the centre is now (every TRAIL_SPACING px).
+local function updateTrail(army: Army)
+	local trail = army.trail
+	local last = trail[#trail]
+	if last and dist(last.X, last.Y, army.center.x, army.center.z) < TRAIL_SPACING then
+		return
+	end
+	table.insert(trail, Vector2.new(army.center.x, army.center.z))
+	if #trail > TRAIL_LENGTH then
+		table.remove(trail, 1)
+		-- Keep breadcrumb routes pointing at the same crumbs after the shift.
+		for _, s in army.soldiers do
+			if s.route.mode == "crumb" then
+				s.route.index = math.max(1, s.route.index - 1)
+			end
+		end
+	end
+end
+
 --[[
-	Move every soldier toward its spot around the army's steering point. (The
-	steering point itself is moved separately, by the player's input.)
+	Where a soldier's formation spot is right now. If the spot is inside an
+	obstacle, pull it in toward the centre along the same line until it's free,
+	so displaced soldiers don't all pile onto one point. (This is what makes a
+	group squeeze through narrow gaps.)
 ]]
-function Army.updateSoldiers(army: Army, dt: number, settings: Settings, obstacles: Obstacles.Obstacles?)
+local function formationTarget(obs: Obstacles.Obstacles, bounds: Navigation.Bounds, cx: number, cz: number, sx: number, sz: number): (number, number)
+	local function free(x: number, z: number): boolean
+		return x >= bounds.minX and x <= bounds.maxX and z >= bounds.minZ and z <= bounds.maxZ and not obs.blockedAt(x, z, 3, 3)
+	end
+	if free(cx + sx, cz + sz) then
+		return cx + sx, cz + sz
+	end
+	local t = 0.85
+	while t > 0.1 do
+		if free(cx + sx * t, cz + sz * t) then
+			return cx + sx * t, cz + sz * t
+		end
+		t -= 0.15
+	end
+	local fx, fz = Navigation.findFreeSpotNear(obs, bounds, cx + sx, cz + sz, 28)
+	if fx and fz then
+		return fx, fz
+	end
+	return cx, cz
+end
+
+-- Choose the simplest route that works: straight to the spot, to the centre, along breadcrumbs, or (rarely) a detour.
+local function planRoute(obs: Obstacles.Obstacles, bounds: Navigation.Bounds, soldier: Soldier, tx: number, tz: number, army: Army, now: number): Route
+	local x, z = soldier.x, soldier.z
+	local cx, cz = army.center.x, army.center.z
+	if Navigation.hasDryPath(obs, x, z, tx, tz) then
+		return { mode = "slot", index = 1, points = nil }
+	end
+	if Navigation.hasDryPath(obs, x, z, cx, cz) then
+		return { mode = "center", index = 1, points = nil }
+	end
+	-- Already following a detour? Keep going rather than recomputing it.
+	local current = soldier.route
+	if current.mode == "detour" and current.points and current.index <= #current.points then
+		return current
+	end
+	-- The newest breadcrumb we can walk straight to (newest = closest to the
+	-- centre). A dry one first: the army's own footsteps lead over the bridge.
+	local trail = army.trail
+	local wetCrumb = -1
+	for i = #trail, math.max(1, #trail - 39), -1 do
+		local crumb = trail[i]
+		if Navigation.hasClearPath(obs, x, z, crumb.X, crumb.Y) then
+			if not Navigation.wadesBetween(obs, x, z, crumb.X, crumb.Y) then
+				return { mode = "crumb", index = i, points = nil }
+			end
+			if wetCrumb < 0 then
+				wetCrumb = i
+			end
+		end
+	end
+	-- No dry way: wading is fine.
+	if Navigation.hasClearPath(obs, x, z, tx, tz) then
+		return { mode = "slot", index = 1, points = nil }
+	end
+	if Navigation.hasClearPath(obs, x, z, cx, cz) then
+		return { mode = "center", index = 1, points = nil }
+	end
+	if wetCrumb > 0 then
+		return { mode = "crumb", index = wetCrumb, points = nil }
+	end
+	-- Nothing in sight: search a small grid for a way to the centre (if this update has searches left).
+	if takeDetourSearch(now) then
+		local detour = Navigation.findDetour(obs, bounds, x, z, cx, cz, SOLDIER_DETOUR_VISITS)
+		if detour and #detour > 0 then
+			return { mode = "detour", index = 1, points = detour }
+		end
+	end
+	return { mode = "center", index = 1, points = nil }
+end
+
+-- ---------------------------------------------------------------------------
+-- Update
+-- ---------------------------------------------------------------------------
+
+-- What each soldier needs to find its way (all optional: without them, open ground).
+export type Ground = { obstacles: Obstacles.Obstacles, bounds: Navigation.Bounds, now: number }
+
+--[[
+	Move every soldier toward its spot around the group's centre. (The centre
+	itself is moved separately.) With `ground`, soldiers find their way around
+	obstacles; without it, they walk straight (open ground).
+]]
+function Army.updateSoldiers(army: Army, dt: number, settings: Settings, ground: Ground?)
 	local center = army.center
+	local obs = if ground then ground.obstacles else nil
+	local now = if ground then ground.now else 0
 
 	-- The formation turns the instant the army does.
 	local centerSpeed = math.sqrt(center.vx * center.vx + center.vz * center.vz)
@@ -265,49 +451,85 @@ function Army.updateSoldiers(army: Army, dt: number, settings: Settings, obstacl
 		army.headingX = center.vx / centerSpeed
 		army.headingZ = center.vz / centerSpeed
 	end
+	if ground then
+		updateTrail(army)
+	end
 
 	local slots = Army.formationSlots(settings.formationSpacing, math.max(30, #army.soldiers))
 	for _, soldier in army.soldiers do
-		-- 1. Where should I be?
+		-- 1. Where should I be? (Archers keep to the rear; spots inside walls are pulled in.)
 		local slot = slots[soldier.slot] or Vector2.zero
 		if soldier.role == "archer" then
 			slot = rearSlot(slot, army.headingX, army.headingZ)
 		end
-		local tx = center.x + slot.X
-		local tz = center.z + slot.Y
-		-- A spot inside a wall or a tree trunk: gather at the centre instead.
-		if obstacles and obstacles.blockedAt(tx, tz, 3, 3) then
-			tx, tz = center.x, center.z
+		local tx, tz = center.x + slot.X, center.z + slot.Y
+		if ground then
+			tx, tz = formationTarget(ground.obstacles, ground.bounds, center.x, center.z, slot.X, slot.Y)
 		end
-		local slotDistance = math.sqrt((tx - soldier.x) ^ 2 + (tz - soldier.z) ^ 2)
+
+		-- 2. How do I get there? (Re-planned a few times a second, staggered.)
+		if ground and now >= soldier.nextThinkAt then
+			soldier.route = planRoute(ground.obstacles, ground.bounds, soldier, tx, tz, army, now)
+			soldier.nextThinkAt = now + THINK_INTERVAL * (0.75 + ((soldier.id * 37) % 50) / 100)
+		end
+		local route = soldier.route
+		local gx, gz = tx, tz
+		local arriving = true
+		if route.mode == "center" then
+			gx, gz, arriving = center.x, center.z, false
+		elseif route.mode == "crumb" then
+			local crumb = army.trail[route.index]
+			gx, gz, arriving = if crumb then crumb.X else center.x, if crumb then crumb.Y else center.z, false
+			-- Reached a breadcrumb? On to the next one (and look for a shortcut).
+			if dist(soldier.x, soldier.z, gx, gz) < 6 then
+				if route.index < #army.trail then
+					route.index += 1
+				else
+					soldier.route = { mode = "center", index = 1, points = nil }
+				end
+				soldier.nextThinkAt = now
+			end
+		elseif route.mode == "detour" then
+			local points = route.points or {}
+			local point = points[route.index]
+			gx, gz, arriving = if point then point.X else center.x, if point then point.Y else center.z, false
+			if dist(soldier.x, soldier.z, gx, gz) < 6 then
+				route.index += 1
+				if route.index > #points then
+					soldier.route = { mode = "center", index = 1, points = nil }
+					soldier.nextThinkAt = now
+				end
+			end
+		end
+		local slotDistance = dist(tx, tz, soldier.x, soldier.z)
 
 		-- In a fight, step toward the enemy instead (Combat keeps this close to the spot).
 		local ex, ez = soldier.engageX, soldier.engageZ
 		local engaged = ex ~= nil and ez ~= nil
-		local gx, gz = tx, tz
 		if ex and ez then
-			gx, gz = ex, ez
+			gx, gz, arriving = ex, ez, false
 		end
 		local toX, toZ = gx - soldier.x, gz - soldier.z
 		local distance = math.sqrt(toX * toX + toZ * toZ)
 
-		-- 2. How fast? Close the gap firmly, slowing to a stop on the spot (or at
-		-- striking distance from the enemy).
-		-- Wading through water slows soldiers down too.
-		local terrain = if obstacles then obstacles.speedFactorAt(soldier.x, soldier.z) else 1
+		-- 3. How fast? Close the gap firmly, slowing to a stop on the spot (or at
+		-- striking distance from the enemy, or a step short of the centre).
+		local terrain = if obs then obs.speedFactorAt(soldier.x, soldier.z) else 1
 		local topSpeed = settings.warriorSpeed * (if slotDistance > FAR_BEHIND then settings.catchUpMultiplier else 1) * terrain
-		local speed
+		local speed = topSpeed
 		if engaged then
 			speed = if distance < ENGAGE_STANDOFF then 0 else math.min(topSpeed, (distance - ENGAGE_STANDOFF) * 6 + 12)
-		else
+		elseif arriving then
 			speed = if distance < 2.5 then 0 else math.min(topSpeed, distance * SETTLE_RATE)
+		elseif soldier.route.mode == "center" then
+			speed = if distance < CENTER_STANDOFF then 0 else math.min(topSpeed, (distance - CENTER_STANDOFF) * 5 + 10)
 		end
 		local desiredX = if distance > 0.01 then toX / distance * speed else 0
 		local desiredZ = if distance > 0.01 then toZ / distance * speed else 0
 
-		if not engaged then
-			-- Move WITH the steering point, plus the correction toward the spot (otherwise
-			-- soldiers only chase their spot and trail behind it).
+		if arriving and not engaged then
+			-- Holding formation: move WITH the centre, plus the correction toward the spot
+			-- (otherwise soldiers only chase their spot and trail behind it).
 			desiredX += center.vx
 			desiredZ += center.vz
 			local cap = topSpeed * settings.catchUpMultiplier
@@ -318,16 +540,17 @@ function Army.updateSoldiers(army: Army, dt: number, settings: Settings, obstacl
 			end
 		end
 
-		-- 3. Personal space (much weaker in a fight, so soldiers can press in).
+		-- 4. Personal space: much weaker while travelling or fighting, so soldiers can
+		-- pass gaps in single file and press in.
 		local pushX, pushZ = separation(soldier, army.soldiers, settings.separationDistance)
-		local push = if engaged then 0.25 else 1
+		local push = if arriving then 1 else 0.25
 		desiredX += pushX * topSpeed * push
 		desiredZ += pushZ * topSpeed * push
 
-		-- 4. Turn to the desired direction at once; only the speed eases.
+		-- 5. Turn to the desired direction at once; only the speed eases. Move, sliding along obstacles.
 		soldier.vx, soldier.vz = Movement.steerVelocity(soldier.vx, soldier.vz, desiredX, desiredZ, settings.warriorAcceleration * dt)
-		if obstacles then
-			local x, z, blockedX, blockedZ = obstacles.move(soldier.x, soldier.z, 3, 3, soldier.vx * dt, soldier.vz * dt)
+		if obs then
+			local x, z, blockedX, blockedZ = obs.move(soldier.x, soldier.z, 3, 3, soldier.vx * dt, soldier.vz * dt)
 			soldier.x, soldier.z = x, z
 			if blockedX then
 				soldier.vx = 0
@@ -340,7 +563,7 @@ function Army.updateSoldiers(army: Army, dt: number, settings: Settings, obstacl
 			soldier.z += soldier.vz * dt
 		end
 
-		-- 5. Fighters face their foe; marching soldiers all face the way the army is
+		-- 6. Fighters face their foe; marching soldiers all face the way the army is
 		-- steered, the instant it turns; otherwise they face the way they walk.
 		local ownSpeed = math.sqrt(soldier.vx * soldier.vx + soldier.vz * soldier.vz)
 		if engaged and distance > 0.01 then
@@ -351,6 +574,41 @@ function Army.updateSoldiers(army: Army, dt: number, settings: Settings, obstacl
 			soldier.yaw = yawToward(soldier.vx, soldier.vz)
 		end
 		soldier.moving = ownSpeed > 8
+
+		if ground then
+			-- 7. Stuck while travelling (jammed in a gap, or a detour that didn't work
+			-- out)? Search for a fresh detour from here. Only a wall in the way calls for
+			-- one: when the straight line is clear, it's other soldiers in the way.
+			if now >= soldier.nextStuckCheckAt then
+				local travelling = soldier.route.mode ~= "slot" and not engaged
+				local moved = dist(soldier.x, soldier.z, soldier.lastCheckX, soldier.lastCheckZ)
+				if travelling and moved < STUCK_DISTANCE and dist(soldier.x, soldier.z, center.x, center.z) > CENTER_STANDOFF + 26
+					and not Navigation.hasClearPath(ground.obstacles, soldier.x, soldier.z, center.x, center.z) and takeDetourSearch(now)
+				then
+					local detour = Navigation.findDetour(ground.obstacles, ground.bounds, soldier.x, soldier.z, center.x, center.z, SOLDIER_DETOUR_VISITS)
+					if detour and #detour > 0 then
+						soldier.route = { mode = "detour", index = 1, points = detour }
+						soldier.nextThinkAt = now + 1.5 -- commit to it for a moment
+					end
+				end
+				soldier.lastCheckX, soldier.lastCheckZ = soldier.x, soldier.z
+				soldier.nextStuckCheckAt = now + STUCK_CHECK * (0.75 + ((soldier.id * 53) % 50) / 100)
+			end
+
+			-- 8. Rare emergency: badly separated for a long time? Put it back near the centre.
+			if dist(soldier.x, soldier.z, center.x, center.z) < RECOVER_DISTANCE then
+				soldier.lostSince = 0
+			elseif soldier.lostSince == 0 then
+				soldier.lostSince = now
+			elseif now - soldier.lostSince >= RECOVER_AFTER then
+				local fx, fz = Navigation.findFreeSpotNear(ground.obstacles, ground.bounds, center.x, center.z, 48)
+				if fx and fz and Navigation.hasClearPath(ground.obstacles, fx, fz, center.x, center.z) then
+					soldier.x, soldier.z, soldier.vx, soldier.vz = fx, fz, 0, 0
+					soldier.route = { mode = "slot", index = 1, points = nil }
+					soldier.lostSince = 0
+				end
+			end
+		end
 	end
 end
 
