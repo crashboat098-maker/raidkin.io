@@ -53,6 +53,37 @@ local Config = {
 		archerCost = 3,
 		-- New recruits appear within this distance of the army's middle.
 		recruitSpread = 40,
+
+		-- SPACE splits every group with 2+ soldiers in half. All groups keep moving
+		-- together; the army's speed comes from its LARGEST group, so splitting
+		-- makes it faster. (From the web's GameConfig.army.split; times in seconds.)
+		split = {
+			minSoldiers = 2,
+			-- Most groups an army can be divided into.
+			maxClusters = 16,
+			-- Minimum time between two splits (stops accidental double splits).
+			cooldown = 0.2,
+			-- A group heads back to the one it split from after
+			-- min + soldiers x perSoldier seconds (at most max). A group waits for
+			-- children already on their way back (at most maxWaitForReturn more),
+			-- so merges cascade up into one army.
+			regroup = { min = 3, perSoldier = 0.2, max = 18, maxWaitForReturn = 8 },
+			-- The front half of each group shoots launchDistance past its partner,
+			-- launchBoost times faster, for at most launchTime seconds.
+			launchBoost = 2.2,
+			launchTime = 0.7,
+			launchDistance = 90,
+			-- Smaller groups get this share of the extra speed their own size would give them.
+			smallClusterBonus = 0.5,
+			-- Groups pack together like agar.io cells, keeping this gap between their edges.
+			clusterGap = 10,
+			-- Group centres may move this much faster than the army to keep up.
+			followSpeedMultiplier = 1.35,
+		},
+		-- If the bulk of the army falls this far behind the steering point, it slows down for them.
+		leash = { startDistance = 36, fullStopDistance = 140 },
+		-- When you steer, groups head for a point this far ahead of the army.
+		lookahead = 360,
 	},
 
 	-- Soul shards: the collectible resource (from the web's GameConfig.soulShards).

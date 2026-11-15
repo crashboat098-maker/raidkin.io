@@ -146,6 +146,49 @@ function Army.addSoldier(army: Army, id: number, x: number, z: number, role: Rol
 	return soldier
 end
 
+-- Roughly how far a group of `count` soldiers reaches from its centre.
+function Army.clusterRadius(count: number, spacing: number): number
+	return if count <= 1 then 4 else spacing * 0.56 * math.sqrt(count) + 4
+end
+
+-- The average position of some soldiers.
+function Army.centroid(soldiers: { Soldier }): (number, number)
+	local x, z = 0, 0
+	for _, s in soldiers do
+		x += s.x
+		z += s.z
+	end
+	local n = math.max(1, #soldiers)
+	return x / n, z / n
+end
+
+--[[
+	Give every soldier a fresh formation spot (after splitting or merging):
+	inner spots first, each going to the closest soldier, so nobody has to
+	cross the whole group.
+]]
+function Army.reassignSlots(army: Army, spacing: number)
+	local count = #army.soldiers
+	local slots = Army.formationSlots(spacing, math.max(30, count))
+	local unassigned = table.clone(army.soldiers)
+	for i = 1, count do
+		local tx = army.center.x + slots[i].X
+		local tz = army.center.z + slots[i].Y
+		local bestIndex, best = 1, math.huge
+		for k, s in unassigned do
+			local d = (s.x - tx) ^ 2 + (s.z - tz) ^ 2
+			if d < best then
+				best = d
+				bestIndex = k
+			end
+		end
+		local soldier = table.remove(unassigned, bestIndex)
+		if soldier then
+			soldier.slot = i
+		end
+	end
+end
+
 -- ---------------------------------------------------------------------------
 -- Update
 -- ---------------------------------------------------------------------------

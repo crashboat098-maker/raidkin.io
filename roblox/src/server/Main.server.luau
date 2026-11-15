@@ -17,6 +17,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared.Config)
 local Movement = require(Shared.Movement)
 local Army = require(Shared.Army)
+local PlayerArmy = require(Shared.PlayerArmy)
 local Version = require(Shared.Version)
 local Battlefield = require(script.Parent.Battlefield)
 local Shards = require(script.Parent.Shards)
@@ -37,6 +38,7 @@ local function remote(name: string): RemoteEvent
 	return r
 end
 local steerRemote = remote("Steer")
+local splitRemote = remote("Split")
 local snapshotRemote = remote("Snapshot")
 local shardRemote = remote("ShardSync")
 local statsRemote = remote("Stats")
@@ -52,7 +54,7 @@ type Resources = {
 }
 
 type PlayerState = {
-	army: Army.Army,
+	army: PlayerArmy.PlayerArmy,
 	-- Roblox streams the world to each player around their avatar; players here
 	-- have none, so this invisible part follows their army and streaming centres
 	-- on it instead (player.ReplicationFocus). Without it the battlefield never loads.
@@ -80,8 +82,9 @@ local bounds: Movement.Bounds = {
 	maxZ = Config.world.size - margin,
 }
 
+-- A new soldier at (x, z) joins the army's nearest group.
 local function newSoldier(state: PlayerState, x: number, z: number, role: Army.Role)
-	Army.addSoldier(state.army, nextSoldierId, x, z, role)
+	Army.addSoldier(PlayerArmy.nearestCluster(state.army, x, z), nextSoldierId, x, z, role)
 	nextSoldierId += 1
 	state.statsDirty = true
 end
@@ -89,7 +92,7 @@ end
 -- A recruit appears close to the army's middle.
 local function summon(state: PlayerState, role: Army.Role)
 	local spread = Config.army.recruitSpread
-	local c = state.army.center
+	local c = state.army.lead
 	newSoldier(state, c.x + spawnRng:NextNumber(-spread, spread), c.z + spawnRng:NextNumber(-spread, spread), role)
 end
 
@@ -116,7 +119,7 @@ local function onPlayerAdded(player: Player)
 	player.ReplicationFocus = focus
 
 	local state: PlayerState = {
-		army = Army.new(player.UserId, colorIndex, cx, cz),
+		army = PlayerArmy.new(player.UserId, colorIndex, cx, cz),
 		focus = focus,
 		steerX = 0,
 		steerZ = 0,
@@ -157,6 +160,17 @@ steerRemote.OnServerEvent:Connect(function(player, x: unknown, z: unknown)
 	end
 	state.steerX = x
 	state.steerZ = z
+end)
+
+-- SPACE from a player: split toward (x, z), where they point (zero = the way the army is heading).
+splitRemote.OnServerEvent:Connect(function(player, x: unknown, z: unknown)
+	local state = states[player]
+	if not state or typeof(x) ~= "number" or typeof(z) ~= "number" or x ~= x or z ~= z then
+		return
+	end
+	if PlayerArmy.split(state.army, os.clock(), x, z) > 0 then
+		state.statsDirty = true
+	end
 end)
 
 local function round1(value: number): number
@@ -203,11 +217,12 @@ local function sendSnapshot()
 	local armies = {}
 	for _, state in states do
 		local army = state.army
-		local flat = table.create(#army.soldiers * 6)
-		for _, s in army.soldiers do
+		local soldiers = PlayerArmy.allSoldiers(army)
+		local flat = table.create(#soldiers * 6)
+		for _, s in soldiers do
 			packSoldier(flat, s.id, s.x, s.z, s.yaw, s.moving, s.role == "archer")
 		end
-		table.insert(armies, { id = army.id, color = army.colorIndex, cx = round1(army.center.x), cz = round1(army.center.z), soldiers = flat })
+		table.insert(armies, { id = army.id, color = army.colorIndex, cx = round1(army.lead.x), cz = round1(army.lead.z), soldiers = flat })
 	end
 	local neutrals = {}
 	for _, n in Neutrals.list do
@@ -229,13 +244,16 @@ local function sendStats(player: Player, state: PlayerState)
 		green = r.green,
 		archerProgress = r.archerProgress,
 		archerCost = Config.army.archerCost,
-		army = #state.army.soldiers,
+		army = PlayerArmy.totalSoldiers(state.army),
+		groups = #state.army.clusters,
+		-- Seconds until the next group heads back (nil when whole or already regrouping).
+		regroupIn = PlayerArmy.secondsUntilRegroup(state.army, os.clock()),
 	})
 end
 
 -- Pick up shards and recruit neutrals with every soldier of one army.
 local function collectAndRecruit(state: PlayerState, now: number, changedShards: { Shards.Shard })
-	local soldiers = state.army.soldiers
+	local soldiers = PlayerArmy.allSoldiers(state.army)
 	if #soldiers == 0 then
 		return
 	end
@@ -302,16 +320,11 @@ RunService.Heartbeat:Connect(function(dt)
 
 		for _, state in states do
 			local army = state.army
-			local speedShare = Army.speedMultiplier(#army.soldiers, Config.army.speedCurve, Config.army.minSpeedMultiplier)
-			local tuning = {
-				maxSpeed = Config.movement.maxSpeed * speedShare,
-				acceleration = Config.movement.acceleration,
-				deceleration = Config.movement.deceleration,
-			}
-			Movement.update(army.center, state.steerX, state.steerZ, STEP, tuning, bounds)
-			Army.updateSoldiers(army, STEP, Config.army)
+			if PlayerArmy.update(army, state.steerX, state.steerZ, STEP, now, bounds) > 0 then
+				state.statsDirty = true
+			end
 			collectAndRecruit(state, now, changedShards)
-			table.insert(playerSpots, Vector2.new(army.center.x, army.center.z))
+			table.insert(playerSpots, Vector2.new(army.lead.x, army.lead.z))
 		end
 
 		Neutrals.update(now, STEP, playerSpots)
@@ -323,11 +336,12 @@ RunService.Heartbeat:Connect(function(dt)
 		if tick % Config.SNAPSHOT_EVERY == 0 then
 			sendSnapshot()
 			for player, state in states do
-				if state.statsDirty then
+				-- While split, the regroup countdown changes all the time.
+				if state.statsDirty or #state.army.clusters > 1 then
 					sendStats(player, state)
 				end
 				-- Keep streaming centred on the army.
-				local c = state.army.center
+				local c = state.army.lead
 				state.focus.CFrame = CFrame.new(c.x * Config.STUDS_PER_PX, 0, c.z * Config.STUDS_PER_PX)
 			end
 		end

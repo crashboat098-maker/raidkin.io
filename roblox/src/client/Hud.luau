@@ -54,15 +54,28 @@ export type Stats = {
 	archerProgress: number,
 	archerCost: number,
 	army: number,
+	-- How many groups the army is split into, and seconds until the next one heads back.
+	groups: number,
+	regroupIn: number?,
 }
 
 function Hud.show(stats: Stats)
+	local split = ""
+	if stats.groups > 1 then
+		split = string.format("   ·   %d GROUPS", stats.groups)
+		if stats.regroupIn then
+			split ..= string.format(" (REGROUP IN %d)", math.ceil(stats.regroupIn))
+		end
+	elseif stats.army >= 2 then
+		split = "   ·   SPACE TO SPLIT"
+	end
 	label.Text = string.format(
-		'<font color="#50c8ff">◆</font> SHARDS %d   ·   NEXT WARRIOR %s %d/%d   ·   <font color="#5aeb78">◆</font> ARCHER %s %d/%d   ·   ARMY %d',
+		'<font color="#50c8ff">◆</font> SHARDS %d   ·   NEXT WARRIOR %s %d/%d   ·   <font color="#5aeb78">◆</font> ARCHER %s %d/%d   ·   ARMY %d%s',
 		stats.shards,
 		blocks(stats.recruitProgress, stats.recruitCost), stats.recruitProgress, stats.recruitCost,
 		blocks(stats.archerProgress, stats.archerCost), stats.archerProgress, stats.archerCost,
-		stats.army
+		stats.army,
+		split
 	)
 end
 

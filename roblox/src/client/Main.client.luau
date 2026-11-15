@@ -148,6 +148,22 @@ local function sendSteering(now: number)
 	steerRemote:FireServer(x, z)
 end
 
+-- SPACE splits the army toward where you're steering (or, standing still, toward
+-- the mouse pointer even when it's close to the middle).
+local splitRemote = remotes:WaitForChild("Split") :: RemoteEvent
+UserInputService.InputBegan:Connect(function(input, typing)
+	if typing or input.KeyCode ~= Enum.KeyCode.Space then
+		return
+	end
+	local x, z = readSteering()
+	if x == 0 and z == 0 and UserInputService.MouseEnabled then
+		local mouse = UserInputService:GetMouseLocation()
+		local middle = camera.ViewportSize / 2
+		x, z = mouse.X - middle.X, mouse.Y - middle.Y
+	end
+	splitRemote:FireServer(x, z)
+end)
+
 -- ---------------------------------------------------------------------------
 -- Camera
 -- ---------------------------------------------------------------------------
@@ -161,12 +177,16 @@ local function updateCamera(army: ArmyView.ArmyState?, dt: number)
 	camera.CameraType = Enum.CameraType.Scriptable
 	if army then
 		local count = 0
-		for _ in army.soldiers do
+		local reach = 0
+		for _, s in army.soldiers do
 			count += 1
+			reach = math.max(reach, math.sqrt((s.x - army.cx) ^ 2 + (s.z - army.cz) ^ 2))
 		end
-		-- Pull back as the army grows, so it always fits on screen.
-		local wanted = 55 + math.sqrt(count) * 6
-		cameraDistance += (wanted - cameraDistance) * math.min(1, dt * 1.5)
+		-- Pull back as the army grows, and far enough to keep every split group on screen.
+		local wanted = math.max(55 + math.sqrt(count) * 6, reach * S * 2.4 + 20)
+		-- Zooming out reacts faster than zooming back in.
+		local rate = if wanted > cameraDistance then 3 else 1.2
+		cameraDistance += (wanted - cameraDistance) * math.min(1, dt * rate)
 		-- Locked on the army (no trailing), like the web version.
 		focus = Vector3.new(army.cx * S, 0, army.cz * S)
 	end
