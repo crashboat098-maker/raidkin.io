@@ -5,6 +5,7 @@
 -- server's Combat for fighting).
 
 local Movement = require(script.Parent.Movement)
+local Obstacles = require(script.Parent.Obstacles)
 
 local Army = {}
 
@@ -255,7 +256,7 @@ end
 	Move every soldier toward its spot around the army's steering point. (The
 	steering point itself is moved separately, by the player's input.)
 ]]
-function Army.updateSoldiers(army: Army, dt: number, settings: Settings)
+function Army.updateSoldiers(army: Army, dt: number, settings: Settings, obstacles: Obstacles.Obstacles?)
 	local center = army.center
 
 	-- The formation turns the instant the army does.
@@ -274,6 +275,10 @@ function Army.updateSoldiers(army: Army, dt: number, settings: Settings)
 		end
 		local tx = center.x + slot.X
 		local tz = center.z + slot.Y
+		-- A spot inside a wall or a tree trunk: gather at the centre instead.
+		if obstacles and obstacles.blockedAt(tx, tz, 3, 3) then
+			tx, tz = center.x, center.z
+		end
 		local slotDistance = math.sqrt((tx - soldier.x) ^ 2 + (tz - soldier.z) ^ 2)
 
 		-- In a fight, step toward the enemy instead (Combat keeps this close to the spot).
@@ -288,7 +293,9 @@ function Army.updateSoldiers(army: Army, dt: number, settings: Settings)
 
 		-- 2. How fast? Close the gap firmly, slowing to a stop on the spot (or at
 		-- striking distance from the enemy).
-		local topSpeed = settings.warriorSpeed * (if slotDistance > FAR_BEHIND then settings.catchUpMultiplier else 1)
+		-- Wading through water slows soldiers down too.
+		local terrain = if obstacles then obstacles.speedFactorAt(soldier.x, soldier.z) else 1
+		local topSpeed = settings.warriorSpeed * (if slotDistance > FAR_BEHIND then settings.catchUpMultiplier else 1) * terrain
 		local speed
 		if engaged then
 			speed = if distance < ENGAGE_STANDOFF then 0 else math.min(topSpeed, (distance - ENGAGE_STANDOFF) * 6 + 12)
@@ -319,8 +326,19 @@ function Army.updateSoldiers(army: Army, dt: number, settings: Settings)
 
 		-- 4. Turn to the desired direction at once; only the speed eases.
 		soldier.vx, soldier.vz = Movement.steerVelocity(soldier.vx, soldier.vz, desiredX, desiredZ, settings.warriorAcceleration * dt)
-		soldier.x += soldier.vx * dt
-		soldier.z += soldier.vz * dt
+		if obstacles then
+			local x, z, blockedX, blockedZ = obstacles.move(soldier.x, soldier.z, 3, 3, soldier.vx * dt, soldier.vz * dt)
+			soldier.x, soldier.z = x, z
+			if blockedX then
+				soldier.vx = 0
+			end
+			if blockedZ then
+				soldier.vz = 0
+			end
+		else
+			soldier.x += soldier.vx * dt
+			soldier.z += soldier.vz * dt
+		end
 
 		-- 5. Fighters face their foe; marching soldiers all face the way the army is
 		-- steered, the instant it turns; otherwise they face the way they walk.

@@ -28,9 +28,12 @@ local Neutrals = require(script.Parent.Neutrals)
 local Combat = require(script.Parent.Combat)
 local Fallen = require(script.Parent.Fallen)
 local Bots = require(script.Parent.Bots)
+local Map = require(script.Parent.Map)
 
 Players.CharacterAutoLoads = false
 Battlefield.build()
+-- Armies collide with the map's walls, buildings and trees, and wade slowly through water.
+PlayerArmy.useObstacles(Map.obstacles)
 Shards.create()
 Neutrals.create()
 
@@ -127,11 +130,9 @@ end
 
 -- A spot at least spawnClearance from every other army (or the emptiest we can find).
 local function spawnSpot(): (number, number)
-	local m = margin + 80
 	local bestX, bestZ, bestGap = Config.world.size / 2, Config.world.size / 2, -1
 	for _ = 1, 40 do
-		local x = rng:NextNumber(m, Config.world.size - m)
-		local z = rng:NextNumber(m, Config.world.size - m)
+		local x, z = Map.randomOpenSpot(rng)
 		local gap = math.huge
 		for _, other in competitors do
 			if other.alive then

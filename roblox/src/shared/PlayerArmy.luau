@@ -19,6 +19,7 @@
 local Config = require(script.Parent.Config)
 local Movement = require(script.Parent.Movement)
 local Army = require(script.Parent.Army)
+local Obstacles = require(script.Parent.Obstacles)
 
 local PlayerArmy = {}
 
@@ -27,6 +28,49 @@ local split = settings.split
 
 -- A group with a smaller one heading back to merge into it slows to this share of its speed.
 local MERGE_WAIT_SPEED = 0.5
+
+-- The solid things on the map (an open field until the server sets the real map).
+local world: Obstacles.Obstacles = Obstacles.none()
+
+-- Use the map's obstacles from now on (the server calls this once at start-up).
+function PlayerArmy.useObstacles(obstacles: Obstacles.Obstacles)
+	world = obstacles
+end
+
+local BODY_HALF_WIDTH, BODY_DEPTH = Movement.BODY_HALF_WIDTH, Movement.BODY_DEPTH
+
+-- Can a group centre stand here (inside the play area, not in a wall)?
+local function standable(x: number, z: number, bounds: Movement.Bounds): boolean
+	return x >= bounds.minX and x <= bounds.maxX and z >= bounds.minZ and z <= bounds.maxZ
+		and not world.blockedAt(x, z, BODY_HALF_WIDTH, BODY_DEPTH)
+end
+
+-- Move a group centre by (dx, dz), or as much of it as stays clear of walls (sliding along them).
+local function nudge(p: Movement.Mover, dx: number, dz: number, bounds: Movement.Bounds)
+	if standable(p.x + dx, p.z + dz, bounds) then
+		p.x += dx
+		p.z += dz
+	elseif standable(p.x + dx, p.z, bounds) then
+		p.x += dx
+	elseif standable(p.x, p.z + dz, bounds) then
+		p.z += dz
+	end
+end
+
+-- The furthest point up to `length` from (x, z) along (dx, dz) that can be reached in a straight line.
+local function clearAhead(x: number, z: number, dx: number, dz: number, length: number): (number, number)
+	local m = Config.world.margin
+	local bounds = { minX = m, minZ = m, maxX = Config.world.size - m, maxZ = Config.world.size - m }
+	local bestX, bestZ = x, z
+	for step = 12, length, 12 do
+		local px, pz = x + dx * step, z + dz * step
+		if not standable(px, pz, bounds) then
+			break
+		end
+		bestX, bestZ = px, pz
+	end
+	return bestX, bestZ
+end
 
 export type ArmyCluster = {
 	-- The group itself: centre, soldiers and heading (see Army).
@@ -333,7 +377,7 @@ function PlayerArmy.split(army: PlayerArmy, now: number, aimX: number, aimZ: num
 		local wrapped = wrap(child, cluster.id, now)
 		wrapped.launchUntil = now + split.launchTime
 		local shot = Army.clusterRadius(#back, settings.formationSpacing) + Army.clusterRadius(#front, settings.formationSpacing) + split.launchDistance
-		wrapped.launchX, wrapped.launchZ = clampToWorld(backX + fx * shot, backZ + fz * shot)
+		wrapped.launchX, wrapped.launchZ = clearAhead(backX, backZ, fx, fz, shot)
 		table.insert(army.clusters, wrapped)
 		made += 1
 	end
@@ -486,7 +530,7 @@ local function steerCluster(ac: ArmyCluster, target: Vector2, armySpeed: number,
 		maxSpeed = speed,
 		acceleration = Config.movement.acceleration,
 		deceleration = Config.movement.deceleration,
-	}, bounds)
+	}, bounds, world)
 end
 
 --[[
@@ -528,10 +572,8 @@ local function packClusters(army: PlayerArmy, plan: Plan, bounds: Movement.Bound
 						local overlap = (wanted - d) * 0.5 -- half per pass keeps it smooth
 						local ux, uz = dx / d, dz / d
 						local share = weight[i] / (weight[i] + weight[j]) -- the heavier one moves less
-						a.x = math.clamp(a.x - ux * overlap * (1 - share), bounds.minX, bounds.maxX)
-						a.z = math.clamp(a.z - uz * overlap * (1 - share), bounds.minZ, bounds.maxZ)
-						b.x = math.clamp(b.x + ux * overlap * share, bounds.minX, bounds.maxX)
-						b.z = math.clamp(b.z + uz * overlap * share, bounds.minZ, bounds.maxZ)
+						nudge(a, -ux * overlap * (1 - share), -uz * overlap * (1 - share), bounds)
+						nudge(b, ux * overlap * share, uz * overlap * share, bounds)
 					end
 				end
 			end
@@ -615,7 +657,7 @@ function PlayerArmy.update(army: PlayerArmy, steerX: number, steerZ: number, dt:
 		maxSpeed = armySpeed * leashFactor(army, plan, targets),
 		acceleration = Config.movement.acceleration,
 		deceleration = Config.movement.deceleration,
-	}, bounds)
+	}, bounds, world)
 	local leadSpeed = math.sqrt(army.lead.vx ^ 2 + army.lead.vz ^ 2)
 	if leadSpeed >= 10 then
 		army.headingX, army.headingZ = army.lead.vx / leadSpeed, army.lead.vz / leadSpeed
@@ -632,7 +674,7 @@ function PlayerArmy.update(army: PlayerArmy, steerX: number, steerZ: number, dt:
 	end
 	packClusters(army, plan, bounds)
 	for _, ac in army.clusters do
-		Army.updateSoldiers(ac.cluster, dt, settings)
+		Army.updateSoldiers(ac.cluster, dt, settings, world)
 	end
 
 	return mergeReturning(army, plan)

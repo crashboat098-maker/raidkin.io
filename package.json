@@ -21,7 +21,8 @@
     "build:server": "esbuild server/index.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=server/dist/server.mjs",
     "build:online": "npm run build-nolog -- --mode online && npm run build:server",
     "start": "node server/dist/server.mjs",
-    "check": "tsc --noEmit -p . && tsc --noEmit -p server"
+    "check": "tsc --noEmit -p . && tsc --noEmit -p server",
+    "roblox:map": "esbuild scripts/export-roblox-map.ts --bundle --platform=node --format=esm --log-level=warning --outfile=node_modules/.cache/export-roblox-map.mjs && node node_modules/.cache/export-roblox-map.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",

@@ -24,6 +24,7 @@ local Config = require(ReplicatedStorage.Shared.Config)
 local Army = require(ReplicatedStorage.Shared.Army)
 local PlayerArmy = require(ReplicatedStorage.Shared.PlayerArmy)
 local Combat = require(script.Parent.Combat)
+local Map = require(script.Parent.Map)
 
 local Bots = {}
 
@@ -295,10 +296,11 @@ local function decide(bot: Combat.Fighter, state: BotState, view: View, now: num
 	if state.mode == "explore" and state.target then
 		return
 	end
-	local m = Config.world.margin + 60
+	-- Somewhere on open ground (see Map), away from danger if we can.
 	local wander = Vector2.new(mx, mz)
 	for _ = 1, 8 do
-		wander = Vector2.new(rng:NextNumber(m, Config.world.size - m), rng:NextNumber(m, Config.world.size - m))
+		local wx, wz = Map.randomOpenSpot(rng)
+		wander = Vector2.new(wx, wz)
 		if safe(wander) then
 			break
 		end

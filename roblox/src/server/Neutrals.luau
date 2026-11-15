@@ -1,10 +1,11 @@
 --!strict
--- Neutral Warriors wandering the map: walk any of your soldiers up to one and it
--- joins your army. Ported from the web's Neutrals.ts (wanderers only for now;
--- village folk and barracks guards come with the real map).
+-- Neutral Warriors on the map: walk any of your soldiers up to one and it joins
+-- your army. Ported from the web's Neutrals.ts: village and forest folk who stay
+-- near their homes, and lone wanderers who roam further.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage.Shared.Config)
+local Map = require(script.Parent.Map)
 
 local Neutrals = {}
 
@@ -13,6 +14,8 @@ export type Neutral = {
 	id: number,
 	homeX: number,
 	homeZ: number,
+	-- How far it strays from home (folk stay close; wanderers roam).
+	roam: number,
 	x: number,
 	z: number,
 	yaw: number,
@@ -27,24 +30,17 @@ export type Neutral = {
 
 local settings = Config.neutrals
 local rng = Random.new(1108)
-local size = Config.world.size
-local margin = Config.world.margin + 20
+-- Village folk barely leave their doorstep.
+local VILLAGE_ROAM = 10
 
 Neutrals.list = {} :: { Neutral }
 
-function Neutrals.create()
-	local middle = size / 2
-	for i = 1, settings.wanderers do
-		-- Spread around the map, not right where armies start.
-		local x, z
-		repeat
-			x = rng:NextNumber(margin, size - margin)
-			z = rng:NextNumber(margin, size - margin)
-		until (x - middle) ^ 2 + (z - middle) ^ 2 > 300 ^ 2
-		table.insert(Neutrals.list, {
-			id = 1_000_000 + i,
+local function add(x: number, z: number, roam: number)
+	table.insert(Neutrals.list, {
+			id = 1_000_000 + #Neutrals.list + 1,
 			homeX = x,
 			homeZ = z,
+			roam = roam,
 			x = x,
 			z = z,
 			yaw = rng:NextNumber(-math.pi, math.pi),
@@ -55,6 +51,21 @@ function Neutrals.create()
 			targetZ = nil,
 			nextWanderAt = rng:NextNumber(0, 3),
 		})
+end
+
+function Neutrals.create()
+	-- Folk at every village and forest home.
+	for _, home in Map.villagerHomes do
+		add(home.X, home.Y, VILLAGE_ROAM)
+	end
+	-- Lone wanderers spread over open ground, not right where armies start.
+	local middle = Map.spawn
+	for _ = 1, settings.wanderers do
+		local x, z
+		repeat
+			x, z = Map.randomOpenSpot(rng)
+		until (x - middle.X) ^ 2 + (z - middle.Y) ^ 2 > 300 ^ 2
+		add(x, z, settings.wanderRadius)
 	end
 end
 
@@ -113,9 +124,13 @@ function Neutrals.update(now: number, dt: number, players: { Vector2 })
 
 		if unit.targetX == nil and now >= unit.nextWanderAt then
 			local angle = rng:NextNumber(0, math.pi * 2)
-			local r = rng:NextNumber(0, settings.wanderRadius)
-			unit.targetX = unit.homeX + math.cos(angle) * r
-			unit.targetZ = unit.homeZ + math.sin(angle) * r
+			local r = rng:NextNumber(0, unit.roam)
+			local tx, tz = unit.homeX + math.cos(angle) * r, unit.homeZ + math.sin(angle) * r
+			if Map.obstacles.blockedAt(tx, tz, 3, 3) then
+				unit.nextWanderAt = now + 0.5 -- somewhere solid: pick again shortly
+			else
+				unit.targetX, unit.targetZ = tx, tz
+			end
 		end
 		local tx, tz = unit.targetX, unit.targetZ
 		if tx == nil or tz == nil then
@@ -130,9 +145,14 @@ function Neutrals.update(now: number, dt: number, players: { Vector2 })
 			unit.moving = false
 			continue
 		end
-		local step = math.min(d, settings.wanderSpeed * dt)
-		unit.x += dx / d * step
-		unit.z += dz / d * step
+		-- Village folk amble; wanderers walk. Water slows them like everyone else.
+		local pace = if unit.roam < settings.wanderRadius then 0.6 else 1
+		local step = math.min(d, settings.wanderSpeed * pace * Map.obstacles.speedFactorAt(unit.x, unit.z) * dt)
+		local x, z, blockedX, blockedZ = Map.obstacles.move(unit.x, unit.z, 3, 3, dx / d * step, dz / d * step)
+		unit.x, unit.z = x, z
+		if blockedX and blockedZ then
+			unit.targetX, unit.targetZ = nil, nil -- walked into a corner: give up on that spot
+		end
 		unit.yaw = math.atan2(-dx, -dz)
 		unit.moving = true
 	end

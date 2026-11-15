@@ -18,8 +18,11 @@ local Config = {
 		-- The battlefield is a square this many px across (2816 px = 704 studs).
 		size = 2816,
 		-- Armies stay this far inside the edge.
-		margin = 40,
+		margin = 64,
 	},
+
+	-- Everyone wading through water moves at this share of their speed.
+	water = { slowdown = 0.6 },
 
 	-- How the army's invisible steering point moves (from the web's GameConfig.movement).
 	movement = {

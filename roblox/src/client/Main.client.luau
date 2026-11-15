@@ -22,6 +22,12 @@ local NameView = require(script.Parent:WaitForChild("NameView"))
 local Hud = require(script.Parent:WaitForChild("Hud"))
 
 local camera = Workspace.CurrentCamera
+
+-- Our scoreboard replaces Roblox's own player list (it sat right on top of it).
+local StarterGui = game:GetService("StarterGui")
+pcall(function()
+	StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.PlayerList, false)
+end)
 local remotes = ReplicatedStorage:WaitForChild("Remotes")
 local steerRemote = remotes:WaitForChild("Steer") :: RemoteEvent
 local snapshotRemote = remotes:WaitForChild("Snapshot") :: RemoteEvent

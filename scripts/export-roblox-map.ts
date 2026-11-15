@@ -1,0 +1,145 @@
+/**
+ * Exports the web game's battlefield (same seed, same generator) as data for
+ * the Roblox version: roblox/src/server/MapData.json, which Rojo turns into a
+ * ModuleScript. Run it again whenever the map generator changes:
+ *
+ *   npm run roblox:map
+ *
+ * Big grids are packed into strings (Roblox parses them at start-up):
+ *  - tile grids (176 x 176, one 16 px tile = one 4-stud terrain cell): one
+ *    character per tile, row by row;
+ *  - fine yes/no grids (8 px cells): run lengths, alternating no/yes, starting with "no";
+ *  - number lists: comma-separated.
+ */
+import { writeFileSync } from 'node:fs';
+import { generateBattlefield } from '../src/game/logic/BattlefieldLayout';
+import { STRUCTURE_SPECS } from '../src/game/logic/Structures';
+import { isWater, isWaterSurface } from '../src/game/logic/Water';
+import { isLava, isLavaSurface } from '../src/game/logic/LavaRivers';
+import { GameConfig } from '../src/game/config/GameConfig';
+import type { Vec2 } from '../src/game/logic/Types';
+
+const layout = generateBattlefield(GameConfig.world as Parameters<typeof generateBattlefield>[0]);
+const { tileSize: T, widthInTiles: cols, heightInTiles: rows, worldWidth, worldHeight } = layout;
+
+/** Small ground clutter the Roblox version doesn't draw (thousands of tiny sprites). */
+const SKIPPED = new Set(['tallGrass', 'fern', 'lushFern', 'flowers', 'glowFlower', 'glowShroom', 'rockSmall', 'pebbles',
+    'reeds', 'lilyPad', 'wisp', 'fairyRing', 'glowPlant', 'bones', 'sapling']);
+
+const round = (v: number) => Math.round(v * 10) / 10;
+const list = (values: number[]) => values.map(round).join(',');
+
+function distanceToSegment (p: Vec2, a: Vec2, b: Vec2): number
+{
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const l2 = dx * dx + dy * dy;
+    const t = l2 === 0 ? 0 : Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2));
+    return Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t));
+}
+
+// Ground tiles: 'a' + GroundTile value.
+let ground = '';
+for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) ground += String.fromCharCode(97 + layout.ground[r][c]);
+
+// What lies over the ground on each tile: '.' nothing, 'w' water, 'l' lava, 'd' dirt path, 's' stone road.
+const overlay = new Array<string>(rows * cols).fill('.');
+for (const trail of layout.trails)
+{
+    const half = trail.width / 2;
+    const mark = trail.kind === 'stone' ? 's' : 'd';
+    for (let i = 0; i < trail.points.length - 1; i++)
+    {
+        const a = trail.points[i], b = trail.points[i + 1];
+        const c0 = Math.max(0, Math.floor((Math.min(a.x, b.x) - half) / T)), c1 = Math.min(cols - 1, Math.floor((Math.max(a.x, b.x) + half) / T));
+        const r0 = Math.max(0, Math.floor((Math.min(a.y, b.y) - half) / T)), r1 = Math.min(rows - 1, Math.floor((Math.max(a.y, b.y) + half) / T));
+        for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++)
+        {
+            if (distanceToSegment({ x: (c + 0.5) * T, y: (r + 0.5) * T }, a, b) <= half) overlay[r * cols + c] = mark;
+        }
+    }
+}
+for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++)
+{
+    // Majority of four sample points, so thin streams still show.
+    let water = 0, lava = 0;
+    for (const [fx, fy] of [[0.3, 0.3], [0.7, 0.3], [0.3, 0.7], [0.7, 0.7]])
+    {
+        const x = (c + fx) * T, y = (r + fy) * T;
+        if (isWaterSurface(layout.water, x, y)) water++;
+        if (isLavaSurface(layout.lava, x, y)) lava++;
+    }
+    if (lava >= 2) overlay[r * cols + c] = 'l';
+    else if (water >= 2) overlay[r * cols + c] = 'w';
+}
+
+// Fine grids for gameplay (8 px cells): where wading slows you, where lava burns, where items may appear.
+const FINE = 8;
+function runs (cols: number, rows: number, at: (c: number, r: number) => boolean): string
+{
+    const out: number[] = [];
+    let current = false, count = 0;
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++)
+    {
+        const v = at(c, r);
+        if (v === current) { count++; continue; }
+        out.push(count);
+        current = v;
+        count = 1;
+    }
+    out.push(count);
+    return out.join(',');
+}
+const fineCols = Math.ceil(worldWidth / FINE), fineRows = Math.ceil(worldHeight / FINE);
+const waterGrid = runs(fineCols, fineRows, (c, r) => isWater(layout.water, (c + 0.5) * FINE, (r + 0.5) * FINE));
+const lavaGrid = runs(fineCols, fineRows, (c, r) => isLava(layout.lava, (c + 0.5) * FINE, (r + 0.5) * FINE));
+const itemSet = new Set(layout.itemSpawnTiles);
+const itemTiles = runs(cols, rows, (c, r) => itemSet.has(r * cols + c));
+
+// Decorations worth drawing: kind index, x, y, variant, flipped (0/1).
+const kinds: string[] = [];
+const decorations: number[] = [];
+for (const d of layout.decorations)
+{
+    if (SKIPPED.has(d.kind)) continue;
+    let k = kinds.indexOf(d.kind);
+    if (k < 0) { kinds.push(d.kind); k = kinds.length - 1; }
+    decorations.push(k, d.x, d.y, d.variant ?? 0, d.flip ? 1 : 0);
+}
+
+const data = {
+    note: 'Generated by scripts/export-roblox-map.ts from the web map (seed ' + GameConfig.world.seed + '). Do not edit by hand.',
+    size: worldWidth,
+    tile: T,
+    cols,
+    rows,
+    fine: FINE,
+    fineCols,
+    playArea: layout.playArea,
+    spawn: layout.spawn,
+    ground,
+    overlay: overlay.join(''),
+    water: waterGrid,
+    lava: lavaGrid,
+    itemTiles,
+    obstacles: list(layout.obstacles.flatMap((o) => [o.x, o.y, o.width, o.height])),
+    decorationKinds: kinds,
+    decorations: list(decorations),
+    structures: layout.structures.map((s) => {
+        const spec = STRUCTURE_SPECS[s.type];
+        return { type: s.type, x: round(s.x), y: round(s.y), variant: s.variant ?? 0, width: spec.width, depth: spec.depth, height: spec.height };
+    }),
+    bridges: [...layout.bridges.filter((b) => !b.edgeOnly), ...layout.lavaBridges].map((b) => ({ kind: b.kind, width: b.width, points: list(b.points.flatMap((p) => [p.x, p.y])) })),
+    volcano: layout.volcano ? {
+        cone: { x: round(layout.volcano.cone.x), y: round(layout.volcano.cone.y) },
+        radius: layout.volcano.radius,
+        pools: layout.volcano.pools.map((p) => ({ x: round(p.x), y: round(p.y), rx: p.rx, ry: p.ry })),
+    } : null,
+    villages: layout.villages.map((v) => ({ x: round(v.center.x), y: round(v.center.y), radius: v.radius, style: v.style ?? 'medieval', homes: list(v.villagerHomes.flatMap((h) => [h.x, h.y])) })),
+    folkHomes: list(layout.folkHomes.flatMap((h) => [h.x, h.y])),
+    castles: layout.castles.map((c) => ({ name: c.name, biome: c.biome, x: round(c.x), y: round(c.y), radius: c.radius })),
+    arena: layout.arena ? { x: round(layout.arena.center.x), y: round(layout.arena.center.y), radius: layout.arena.radius, wall: layout.arena.wall } : null,
+};
+
+const json = JSON.stringify(data);
+writeFileSync('roblox/src/server/MapData.json', json);
+console.log(`MapData.json: ${(json.length / 1024).toFixed(0)} KB, ${decorations.length / 5} decorations (${kinds.length} kinds), ${layout.obstacles.length} obstacles, ${layout.structures.length} structures`);

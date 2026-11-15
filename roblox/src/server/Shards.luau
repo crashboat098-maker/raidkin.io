@@ -7,6 +7,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage.Shared.Config)
+local Map = require(script.Parent.Map)
 
 local Shards = {}
 
@@ -32,14 +33,13 @@ local function distanceSquared(ax: number, az: number, bx: number, bz: number): 
 	return (ax - bx) ^ 2 + (az - bz) ^ 2
 end
 
--- A random open spot, not crowded by other shards and away from `avoid` (player positions).
+-- A random spot on open ground (see Map), not crowded by other shards and away from `avoid` (army positions).
 local function findSpot(avoid: { Vector2 }): (number, number)
 	local spacing2 = settings.minSpacing ^ 2
 	local away2 = settings.respawnAwayFromPlayers ^ 2
 	local x, z = 0, 0
 	for _ = 1, 25 do
-		x = rng:NextNumber(margin, size - margin)
-		z = rng:NextNumber(margin, size - margin)
+		x, z = Map.randomOpenSpot(rng)
 		local ok = true
 		for _, s in Shards.list do
 			if s.active and distanceSquared(s.x, s.z, x, z) < spacing2 then
