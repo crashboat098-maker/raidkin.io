@@ -45,9 +45,48 @@ local Config = {
 		warriorAcceleration = 3000,
 		-- Soldiers gently push apart when closer than this.
 		separationDistance = 10,
-		-- TEMPORARY until recruiting is ported: every army starts with this many soldiers.
-		startingSoldiers = 8,
+		-- Every army starts as a single soldier.
+		startingSoldiers = 1,
+		-- Soul shards needed to recruit one Warrior.
+		recruitCost = 5,
+		-- Green crystals needed to recruit one Archer (their own separate progress).
+		archerCost = 3,
+		-- New recruits appear within this distance of the army's middle.
+		recruitSpread = 40,
 	},
+
+	-- Soul shards: the collectible resource (from the web's GameConfig.soulShards).
+	shards = {
+		-- How many per million square px of playable ground.
+		perMillionSquarePixels = 55,
+		-- How close a soldier must get to pick one up.
+		pickupRadius = 12,
+		-- Shards try to keep at least this far apart.
+		minSpacing = 40,
+		-- A collected shard comes back somewhere else after this many seconds...
+		respawnDelay = { min = 5, max = 9 },
+		-- ...and never this close to a player.
+		respawnAwayFromPlayers = 160,
+		-- Share of shards that are rare green crystals (they recruit Archers).
+		greenShare = 0.15,
+	},
+
+	-- Lone neutral Warriors wandering the map; any soldier who reaches one recruits it.
+	neutrals = {
+		wanderers = 36,
+		-- How far a wanderer strays from its home spot, and how fast.
+		wanderRadius = 40,
+		wanderSpeed = 18,
+		-- Any of your soldiers recruits a neutral within this distance.
+		recruitRange = 26,
+		-- A recruited neutral's spot stays empty for this many seconds...
+		respawnDelay = { min = 30, max = 45 },
+		-- ...and only refills when no player is this close.
+		respawnPlayerClearance = 160,
+	},
+
+	-- Neutral (unrecruited) soldiers are drawn in this colour.
+	neutralColor = Color3.fromRGB(150, 140, 120),
 
 	-- Army colours, given out to players in join order.
 	colors = {

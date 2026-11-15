@@ -16,12 +16,25 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared:WaitForChild("Config"))
 local Version = require(Shared:WaitForChild("Version"))
 local ArmyView = require(script.Parent:WaitForChild("ArmyView"))
+local ShardView = require(script.Parent:WaitForChild("ShardView"))
+local Hud = require(script.Parent:WaitForChild("Hud"))
 
 local player = Players.LocalPlayer
 local camera = Workspace.CurrentCamera
 local remotes = ReplicatedStorage:WaitForChild("Remotes")
 local steerRemote = remotes:WaitForChild("Steer") :: RemoteEvent
 local snapshotRemote = remotes:WaitForChild("Snapshot") :: RemoteEvent
+local shardRemote = remotes:WaitForChild("ShardSync") :: RemoteEvent
+local statsRemote = remotes:WaitForChild("Stats") :: RemoteEvent
+
+-- Shards: every one once (asked for below, now that we're listening), then changes.
+shardRemote.OnClientEvent:Connect(function(message)
+	ShardView.apply(message.shards)
+end)
+statsRemote.OnClientEvent:Connect(function(stats)
+	Hud.show(stats)
+end)
+shardRemote:FireServer()
 
 local S = Config.STUDS_PER_PX
 
@@ -32,14 +45,14 @@ local S = Config.STUDS_PER_PX
 type Snapshot = { t: number, armies: { ArmyView.ArmyState } }
 local snapshots: { Snapshot } = {}
 
--- Unpacks the server's flat soldier lists ({ id, x, z, yaw, moving, ... }).
+-- Unpacks the server's flat soldier lists ({ id, x, z, yaw, moving, archer, ... }).
 snapshotRemote.OnClientEvent:Connect(function(message)
 	local armies = {}
 	for _, a in message.armies do
 		local soldiers: { [number]: ArmyView.SoldierState } = {}
 		local flat = a.soldiers
-		for i = 1, #flat, 5 do
-			soldiers[flat[i]] = { x = flat[i + 1], z = flat[i + 2], yaw = flat[i + 3], moving = flat[i + 4] == 1 }
+		for i = 1, #flat, 6 do
+			soldiers[flat[i]] = { x = flat[i + 1], z = flat[i + 2], yaw = flat[i + 3], moving = flat[i + 4] == 1, archer = flat[i + 5] == 1 }
 		end
 		table.insert(armies, { id = a.id, color = a.color, cx = a.cx, cz = a.cz, soldiers = soldiers })
 	end
@@ -76,7 +89,7 @@ local function blendedArmies(renderTime: number): { ArmyView.ArmyState }
 		for id, s in army.soldiers do
 			local p = prev and prev.soldiers[id]
 			if p then
-				soldiers[id] = { x = p.x + (s.x - p.x) * a, z = p.z + (s.z - p.z) * a, yaw = s.yaw, moving = s.moving }
+				soldiers[id] = { x = p.x + (s.x - p.x) * a, z = p.z + (s.z - p.z) * a, yaw = s.yaw, moving = s.moving, archer = s.archer }
 			else
 				soldiers[id] = s
 			end

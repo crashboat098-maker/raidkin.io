@@ -7,8 +7,12 @@ local Movement = require(script.Parent.Movement)
 
 local Army = {}
 
+-- Melee Warriors, and Archers who keep to the back of the formation.
+export type Role = "warrior" | "archer"
+
 export type Soldier = {
 	id: number,
+	role: Role,
 	-- Index of this soldier's spot in the formation.
 	slot: number,
 	x: number,
@@ -80,6 +84,20 @@ function Army.formationSlots(spacing: number, count: number): { Vector2 }
 	return slots
 end
 
+-- How far behind the army's middle Archers stand.
+local ARCHER_REAR = 10
+
+-- An Archer's spot: its formation slot, moved back along the heading so it's at
+-- least ARCHER_REAR behind the middle, with the Warriors between it and the enemy.
+local function rearSlot(slot: Vector2, hx: number, hz: number): Vector2
+	local ahead = slot.X * hx + slot.Y * hz
+	if ahead <= -ARCHER_REAR then
+		return slot
+	end
+	local back = ahead + ARCHER_REAR
+	return Vector2.new(slot.X - hx * back, slot.Y - hz * back)
+end
+
 -- The army's top speed share for its size, blended between the points of `curve`.
 function Army.speedMultiplier(size: number, curve: { { number } }, minimum: number): number
 	if #curve == 0 then
@@ -114,7 +132,7 @@ function Army.new(id: number, colorIndex: number, x: number, z: number): Army
 end
 
 -- Add a soldier at (x, z); it takes the first free formation spot (the outer edge).
-function Army.addSoldier(army: Army, id: number, x: number, z: number): Soldier
+function Army.addSoldier(army: Army, id: number, x: number, z: number, role: Role?): Soldier
 	local used: { [number]: boolean } = {}
 	for _, s in army.soldiers do
 		used[s.slot] = true
@@ -123,7 +141,7 @@ function Army.addSoldier(army: Army, id: number, x: number, z: number): Soldier
 	while used[slot] do
 		slot += 1
 	end
-	local soldier: Soldier = { id = id, slot = slot, x = x, z = z, vx = 0, vz = 0, yaw = 0, moving = false }
+	local soldier: Soldier = { id = id, role = role or "warrior", slot = slot, x = x, z = z, vx = 0, vz = 0, yaw = 0, moving = false }
 	table.insert(army.soldiers, soldier)
 	return soldier
 end
@@ -180,6 +198,9 @@ function Army.updateSoldiers(army: Army, dt: number, settings: Settings)
 	for _, soldier in army.soldiers do
 		-- 1. Where should I be?
 		local slot = slots[soldier.slot] or Vector2.zero
+		if soldier.role == "archer" then
+			slot = rearSlot(slot, army.headingX, army.headingZ)
+		end
 		local tx = center.x + slot.X
 		local tz = center.z + slot.Y
 		local toX, toZ = tx - soldier.x, tz - soldier.z

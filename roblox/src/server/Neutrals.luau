@@ -1,0 +1,141 @@
+--!strict
+-- Neutral Warriors wandering the map: walk any of your soldiers up to one and it
+-- joins your army. Ported from the web's Neutrals.ts (wanderers only for now;
+-- village folk and barracks guards come with the real map).
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Config = require(ReplicatedStorage.Shared.Config)
+
+local Neutrals = {}
+
+export type Neutral = {
+	-- Ids start at 1,000,000 so they never clash with soldier ids when drawn.
+	id: number,
+	homeX: number,
+	homeZ: number,
+	x: number,
+	z: number,
+	yaw: number,
+	moving: boolean,
+	-- False while recruited and waiting to come back.
+	active: boolean,
+	respawnAt: number,
+	targetX: number?,
+	targetZ: number?,
+	nextWanderAt: number,
+}
+
+local settings = Config.neutrals
+local rng = Random.new(1108)
+local size = Config.world.size
+local margin = Config.world.margin + 20
+
+Neutrals.list = {} :: { Neutral }
+
+function Neutrals.create()
+	local middle = size / 2
+	for i = 1, settings.wanderers do
+		-- Spread around the map, not right where armies start.
+		local x, z
+		repeat
+			x = rng:NextNumber(margin, size - margin)
+			z = rng:NextNumber(margin, size - margin)
+		until (x - middle) ^ 2 + (z - middle) ^ 2 > 300 ^ 2
+		table.insert(Neutrals.list, {
+			id = 1_000_000 + i,
+			homeX = x,
+			homeZ = z,
+			x = x,
+			z = z,
+			yaw = rng:NextNumber(-math.pi, math.pi),
+			moving = false,
+			active = true,
+			respawnAt = 0,
+			targetX = nil,
+			targetZ = nil,
+			nextWanderAt = rng:NextNumber(0, 3),
+		})
+	end
+end
+
+--[[
+	Recruit every active neutral within range of (x, z). Returns the ones that
+	joined (they're taken out of play at once, so each can only join one army).
+]]
+function Neutrals.recruitNear(x: number, z: number, now: number): { Neutral }
+	local joined = {}
+	local r2 = settings.recruitRange ^ 2
+	for _, unit in Neutrals.list do
+		if unit.active and (unit.x - x) ^ 2 + (unit.z - z) ^ 2 <= r2 then
+			unit.active = false
+			unit.moving = false
+			unit.respawnAt = now + rng:NextNumber(settings.respawnDelay.min, settings.respawnDelay.max)
+			table.insert(joined, unit)
+		end
+	end
+	return joined
+end
+
+-- Is any recruitable neutral near this box? (Lets an army skip checking each soldier.)
+function Neutrals.anyNear(minX: number, minZ: number, maxX: number, maxZ: number): boolean
+	local r = settings.recruitRange
+	for _, unit in Neutrals.list do
+		if unit.active and unit.x >= minX - r and unit.x <= maxX + r and unit.z >= minZ - r and unit.z <= maxZ + r then
+			return true
+		end
+	end
+	return false
+end
+
+-- Wander about; bring back recruited ones at their home spot when no player is near.
+function Neutrals.update(now: number, dt: number, players: { Vector2 })
+	local clear2 = settings.respawnPlayerClearance ^ 2
+	for _, unit in Neutrals.list do
+		if not unit.active then
+			if now >= unit.respawnAt then
+				local blocked = false
+				for _, p in players do
+					if (p.X - unit.homeX) ^ 2 + (p.Y - unit.homeZ) ^ 2 < clear2 then
+						blocked = true
+						break
+					end
+				end
+				if blocked then
+					unit.respawnAt = now + 2 -- try again shortly
+				else
+					unit.active = true
+					unit.x, unit.z = unit.homeX, unit.homeZ
+					unit.targetX, unit.targetZ = nil, nil
+				end
+			end
+			continue
+		end
+
+		if unit.targetX == nil and now >= unit.nextWanderAt then
+			local angle = rng:NextNumber(0, math.pi * 2)
+			local r = rng:NextNumber(0, settings.wanderRadius)
+			unit.targetX = unit.homeX + math.cos(angle) * r
+			unit.targetZ = unit.homeZ + math.sin(angle) * r
+		end
+		local tx, tz = unit.targetX, unit.targetZ
+		if tx == nil or tz == nil then
+			unit.moving = false
+			continue
+		end
+		local dx, dz = tx - unit.x, tz - unit.z
+		local d = math.sqrt(dx * dx + dz * dz)
+		if d < 1.5 then
+			unit.targetX, unit.targetZ = nil, nil
+			unit.nextWanderAt = now + rng:NextNumber(1.5, 4.5)
+			unit.moving = false
+			continue
+		end
+		local step = math.min(d, settings.wanderSpeed * dt)
+		unit.x += dx / d * step
+		unit.z += dz / d * step
+		unit.yaw = math.atan2(-dx, -dz)
+		unit.moving = true
+	end
+end
+
+return Neutrals
