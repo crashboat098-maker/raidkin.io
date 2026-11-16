@@ -6,9 +6,9 @@ import { TouchControls } from './TouchControls';
 type Key = Input.Keyboard.Key;
 
 /** Mouse steering: inside this many screen pixels of the army the army stops... */
-const MOUSE_DEAD_ZONE = 14;
-/** ...and from this far out it moves at full speed (slower in between, so it eases to a stop). */
-const MOUSE_FULL_SPEED = 90;
+const MOUSE_DEAD_ZONE = 4;
+/** ...and from this far out it moves at full speed (slower in between, so it eases onto the pointer). */
+const MOUSE_FULL_SPEED = 40;
 
 /**
  * Turns the player's input into simple commands: a movement direction, and

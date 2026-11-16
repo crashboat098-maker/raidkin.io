@@ -40,6 +40,8 @@ export interface Warrior {
     /** Stuck detection: where it was at the last check, and when to check next. */
     lastCheckPosition: Vec2;
     nextStuckCheckAt: number;
+    /** How long it has been pressing against a wall while trying to walk (seconds). */
+    wallTime: number;
 
     // --- Combat ---
     hp: number;
@@ -98,6 +100,8 @@ export const WARRIOR_BODY: Body = { halfWidth: 3, height: 3 };
 
 /** How often to check whether a travelling Warrior is stuck (ms). */
 const STUCK_CHECK_MS = 900;
+/** Pressing against a wall this long (seconds) while trying to walk sends a soldier looking for a way round. */
+const WALL_STUCK_S = 0.25;
 /** Moving less than this between checks while travelling counts as stuck. */
 const STUCK_DISTANCE = 4;
 /**
@@ -127,8 +131,14 @@ function takeDetourSearch (now: number): boolean
 }
 /** Warriors heading for the centre (not yet in formation) stop this close to it. */
 const CENTER_STANDOFF = 10;
-/** How hard a soldier closes in on its formation spot (per second, times the distance). Was 5. */
-const SETTLE_RATE = 10;
+/**
+ * Soldiers head straight for their place: at least FOLLOW_BOOST times the
+ * army's speed (so they keep pace with no lag), and FOLLOW_GAIN times the gap
+ * when further off (so they catch up fast after a turn). The same rule as the
+ * original Raidkin.
+ */
+const FOLLOW_BOOST = 1.45;
+const FOLLOW_GAIN = 3.5;
 /** Fighting Warriors stop this close to their enemy (inside striking range). */
 const ENGAGE_STANDOFF = 8;
 
@@ -159,6 +169,7 @@ export function createWarrior (id: number, position: Vec2, maxHp = 100, role: So
         lostSince: 0,
         lastCheckPosition: { x: position.x, y: position.y },
         nextStuckCheckAt: 0,
+        wallTime: 0,
     };
 }
 
@@ -340,6 +351,9 @@ export function updateCluster (
     const slots = formationSlots(settings.formationSpacing, Math.max(30, cluster.warriors.length));
     const centre = cluster.center.position;
 
+    // How fast my place is moving: soldiers may go faster than this to keep up.
+    const centreSpeed = Math.hypot(cluster.center.velocity.x, cluster.center.velocity.y);
+
     // Big clusters: find close neighbours through a grid instead of checking every pair.
     const useGrid = cluster.warriors.length > GRID_THRESHOLD;
     if (useGrid)
@@ -350,9 +364,12 @@ export function updateCluster (
 
     for (const warrior of cluster.warriors)
     {
-        // 1. Where should I be? (Archers keep to the rear, Guardians to the front.)
+        // 1. Where should I be? My slot round the centre (the point the player
+        //    steers), whether marching or standing. Archers keep to the rear,
+        //    Guardians to the front.
         const slot = slots[warrior.slot] ?? { x: 0, y: 0 };
-        const target = formationTarget(centre, roleSlot(warrior.role, slot, cluster.heading), obstacles, bounds);
+        const offset = roleSlot(warrior.role, slot, cluster.heading);
+        const target = formationTarget(centre, offset, obstacles, bounds);
 
         // 2. How do I get there? (re-planned a few times a second, staggered)
         if (now >= warrior.nextThinkAt)
@@ -400,10 +417,10 @@ export function updateCluster (
         const topSpeed = settings.warriorSpeed * roleSpeed * (farBehind ? settings.catchUpMultiplier : 1) * terrain;
 
         let speed = topSpeed;
-        // Slow down near the slot and stop when close enough (prevents fidgeting).
-        // A firm settle (closes the gap at 10x its size per second) keeps the formation
-        // tight and moving as one block, instead of soldiers drifting in behind.
-        if (arriving) speed = goalDistance < 2.5 ? 0 : Math.min(topSpeed, goalDistance * SETTLE_RATE);
+        // Heading for my place: straight there, quick enough to keep up with the
+        // army (FOLLOW_BOOST x its speed) and quicker still the further off I am,
+        // but never past it. No springs, so nothing wobbles or lags behind.
+        if (arriving) speed = Math.min(goalDistance / Math.max(dt, 1e-4), Math.max(topSpeed, centreSpeed * FOLLOW_BOOST, goalDistance * FOLLOW_GAIN));
         // Heading for the centre: stop a step short instead of crowding it.
         if (warrior.route.mode === 'center' && !engaged) speed = goalDistance < CENTER_STANDOFF ? 0 : Math.min(topSpeed, (goalDistance - CENTER_STANDOFF) * 5 + 10);
         // Fighting: close in to striking distance, then hold.
@@ -411,34 +428,54 @@ export function updateCluster (
         let desiredX = goalDistance > 0.01 ? (toGoalX / goalDistance) * speed : 0;
         let desiredY = goalDistance > 0.01 ? (toGoalY / goalDistance) * speed : 0;
 
-        // Holding formation: move WITH the centre, plus a correction toward the
-        // spot. Without this, soldiers only chase where their spot is, trail
-        // behind it, and keep sliding the old way when the army turns.
-        if (arriving && !engaged)
-        {
-            desiredX += cluster.center.velocity.x;
-            desiredY += cluster.center.velocity.y;
-            const cap = topSpeed * settings.catchUpMultiplier;
-            const desiredSpeed = Math.hypot(desiredX, desiredY);
-            if (desiredSpeed > cap) { desiredX *= cap / desiredSpeed; desiredY *= cap / desiredSpeed; }
-        }
-
-        // 4. Personal space: push away from very close neighbours.
-        //    Much weaker while travelling, so Warriors can pass gaps in single file.
+        // 4. Personal space: a gentle nudge apart, only when two soldiers actually
+        //    overlap (formation places are further apart than this, so it never
+        //    fights the formation). Weaker still while travelling, so soldiers
+        //    can pass gaps in single file.
         const push = separation(warrior, useGrid ? null : cluster.warriors, settings.separationDistance);
-        const pushStrength = arriving ? 1 : 0.25;
+        const pushStrength = arriving ? 0.6 : 0.25;
         desiredX += push.x * topSpeed * pushStrength;
         desiredY += push.y * topSpeed * pushStrength;
 
         // 5. Turn to the desired direction at once; only the speed eases.
         accelerate(warrior.velocity, desiredX, desiredY, settings.warriorAcceleration * dt);
 
-        // 6. Move, sliding along obstacles.
-        const moved = obstacles.move(warrior.position, WARRIOR_BODY, warrior.velocity.x * dt, warrior.velocity.y * dt);
+        // 6. Move. Walking into a wall, the blocked part of the step goes into
+        //    sliding along it, toward the goal (head-on: half the soldiers go
+        //    each way), so nobody stands pressing into a wall.
+        const stepX = warrior.velocity.x * dt;
+        const stepY = warrior.velocity.y * dt;
+        let moved = obstacles.move(warrior.position, WARRIOR_BODY, stepX, stepY);
+        const hitWall = moved.blockedX || moved.blockedY;
+        if (hitWall && !engaged && goalDistance > 2 && moved.blockedX !== moved.blockedY)
+        {
+            const side = warrior.id % 2 === 0 ? 1 : -1;
+            const along = moved.blockedX
+                ? { x: 0, y: (Math.abs(toGoalY) > 2 ? Math.sign(toGoalY) : side) * Math.abs(stepX) }
+                : { x: (Math.abs(toGoalX) > 2 ? Math.sign(toGoalX) : side) * Math.abs(stepY), y: 0 };
+            const slid = obstacles.move({ x: moved.x, y: moved.y }, WARRIOR_BODY, along.x, along.y);
+            moved = { x: slid.x, y: slid.y, blockedX: moved.blockedX || slid.blockedX, blockedY: moved.blockedY || slid.blockedY };
+        }
         warrior.position.x = clamp(moved.x, bounds.x, bounds.x + bounds.width);
         warrior.position.y = clamp(moved.y, bounds.y, bounds.y + bounds.height);
         if (moved.blockedX) warrior.velocity.x = 0;
         if (moved.blockedY) warrior.velocity.y = 0;
+
+        // Held up by a wall for a moment (its place or the next breadcrumb is
+        // round a corner it can't slide past)? Search for a way round right away,
+        // instead of waiting for the next re-plan.
+        warrior.wallTime = hitWall && !engaged && speed > 10 ? warrior.wallTime + dt : Math.max(0, warrior.wallTime - dt);
+        if (warrior.wallTime > WALL_STUCK_S && warrior.route.mode !== 'detour' && takeDetourSearch(now))
+        {
+            warrior.wallTime = 0;
+            const detour = findDetour(obstacles, bounds, warrior.position, target, SOLDIER_DETOUR_VISITS)
+                ?? findDetour(obstacles, bounds, warrior.position, centre, SOLDIER_DETOUR_VISITS);
+            if (detour && detour.length > 0)
+            {
+                warrior.route = { mode: 'detour', points: detour, index: 0 };
+                warrior.nextThinkAt = now + 1000; // commit to it for a moment
+            }
+        }
 
         // Marching: everyone faces the way the army is steered, the instant it turns
         // (not when each soldier's own feet have come round). Fighting soldiers face their foe.

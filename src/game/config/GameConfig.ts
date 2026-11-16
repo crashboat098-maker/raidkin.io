@@ -180,8 +180,12 @@ export const GameConfig = {
         catchUpMultiplier: 1.4,
         /** How quickly a Warrior speeds up and turns (higher = snappier, lower = icier). */
         warriorAcceleration: 3000,
-        /** Warriors gently push apart when closer than this. */
-        separationDistance: 10,
+        /**
+         * Soldiers gently push apart only when closer than this: about touching
+         * (a body is 6 px wide; formation places are ~10 px apart, so it never
+         * fights the formation, it just stops soldiers piling onto one spot).
+         */
+        separationDistance: 7,
         /** How often each Warrior re-plans its route (ms). Staggered across Warriors. */
         thinkIntervalMs: 220,
         /**

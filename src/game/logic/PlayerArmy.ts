@@ -400,8 +400,25 @@ export function updatePlayerArmy (
         // The smaller of the two runs to the bigger one (see clusterTargets): the bigger one waits.
         waitingForChild.add(child.cluster.warriors.length <= parent.cluster.warriors.length ? parent : child);
     }
+    // A whole army (one group) is centred exactly on the lead: the camera, the
+    // commander and the formation are the same point, so nothing drifts or
+    // sloshes against anything else. Split groups steer their own centres.
+    const whole = army.clusters.length === 1 && army.clusters[0].launchUntil === 0;
     for (const ac of army.clusters)
     {
+        if (whole)
+        {
+            const centre = ac.cluster.center;
+            const lead = army.lead.center;
+            centre.position.x = lead.position.x;
+            centre.position.y = lead.position.y;
+            centre.velocity.x = lead.velocity.x;
+            centre.velocity.y = lead.velocity.y;
+            centre.facing = lead.facing;
+            centre.isMoving = lead.isMoving;
+            ac.route = { mode: 'direct' };
+            continue;
+        }
         const target = targets.get(ac) ?? army.lead.center.position;
         steerCluster(ac, target, army, armySpeed, waitingForChild.has(ac) ? MERGE_WAIT_SPEED : 1, dt, now, obstacles, bounds, settings, movement);
     }
@@ -622,7 +639,13 @@ function leashFactor (army: PlayerArmy, plan: RegroupPlan, targets: Map<ArmyClus
         // A cluster ahead of the army never holds it back (no tether); only one left behind does.
         else if (!plan.returning.has(ac)) lag = isBehind(ac, army, blob) ? distance(ac.cluster.center.position, lead) - blob : 0;
         else if (target) lag = distance(ac.cluster.center.position, target);
-        if (ac.cluster.warriors.length > 0) lag = Math.max(lag, distance(ac.cluster.center.position, centroid(ac.cluster.warriors)));
+        // Soldiers trail behind their centre along its path on purpose (see Army's
+        // path following): only lag beyond the formation's own length counts.
+        if (ac.cluster.warriors.length > 0)
+        {
+            const trailing = distance(ac.cluster.center.position, centroid(ac.cluster.warriors));
+            lag = Math.max(lag, trailing - clusterRadius(ac.cluster.warriors.length, settings.formationSpacing));
+        }
         const weight = Math.max(1, ac.cluster.warriors.length);
         lags.push({ lag, weight });
         totalWeight += weight;

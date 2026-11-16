@@ -54,10 +54,14 @@ const INPUT_KEEPALIVE_MS = 400;
 const REACH_RESEND = 24;
 /** Own-army prediction: how far ahead of the server's last word we aim (seconds of travel)... */
 const PREDICTION_LEAD_S = 0.12;
-/** ...how much drift is tolerated while moving, and beyond what distance we just jump (world px). */
-const MOVING_TOLERANCE = 24;
-/** ...the tolerance also grows with speed (seconds of travel), since the server is always a round trip behind... */
-const MOVING_TOLERANCE_S = 0.25;
+/**
+ * ...how quickly we drift toward the server's word while moving (share of the gap per
+ * second). A steady, gentle pull every frame: differences never build up, so
+ * there's never a sudden yank back (the old "ignore it, then pull hard" wobbled).
+ * Differences smaller than MOVING_DEADZONE are rounding and network noise: ignored.
+ */
+const MOVING_CORRECTION = 1.5;
+const MOVING_DEADZONE = 2;
 /** ...after a turn, start or stop, the server's word is stale for about a round trip: don't correct meanwhile. */
 const TURN_GRACE_MS = 350;
 const SNAP_DISTANCE = 220;
@@ -331,11 +335,10 @@ export class NetWorld implements GameWorld
         }
         else if (length > 0.01)
         {
-            // While moving, small differences are just network wobble: leave them be.
-            const tolerance = Math.max(MOVING_TOLERANCE, this.you.speed * MOVING_TOLERANCE_S);
-            if (error > tolerance)
+            // While moving: drift gently toward the server every frame (see MOVING_CORRECTION).
+            if (error > MOVING_DEADZONE)
             {
-                const fix = ((error - tolerance) * Math.min(1, dt * 2)) / error;
+                const fix = Math.min(1, dt * MOVING_CORRECTION);
                 p.x += errorX * fix;
                 p.y += errorY * fix;
             }
