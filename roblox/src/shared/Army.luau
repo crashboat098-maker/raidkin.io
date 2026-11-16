@@ -25,8 +25,9 @@ export type Route = {
 	points: { Vector2 }?,
 }
 
--- Melee Warriors, and Archers who keep to the back of the formation.
-export type Role = "warrior" | "archer"
+-- Melee Warriors, Archers who keep to the back of the formation, and heavily
+-- armoured Guardians who hold the front.
+export type Role = "warrior" | "archer" | "guardian"
 
 export type Soldier = {
 	id: number,
@@ -77,6 +78,7 @@ export type Settings = {
 	formationSpacing: number,
 	warriorSpeed: number,
 	catchUpMultiplier: number,
+	guardianSpeedMultiplier: number,
 	warriorAcceleration: number,
 	separationDistance: number,
 	speedCurve: { { number } },
@@ -137,6 +139,20 @@ local function rearSlot(slot: Vector2, hx: number, hz: number): Vector2
 	end
 	local back = ahead + ARCHER_REAR
 	return Vector2.new(slot.X - hx * back, slot.Y - hz * back)
+end
+
+-- How far ahead of the army's middle Guardians stand.
+local GUARDIAN_FRONT = 8
+
+-- A Guardian's spot: moved forward so it's at least GUARDIAN_FRONT ahead of the
+-- middle, shields between the enemy and everyone else.
+local function frontSlot(slot: Vector2, hx: number, hz: number): Vector2
+	local ahead = slot.X * hx + slot.Y * hz
+	if ahead >= GUARDIAN_FRONT then
+		return slot
+	end
+	local forward = GUARDIAN_FRONT - ahead
+	return Vector2.new(slot.X + hx * forward, slot.Y + hz * forward)
 end
 
 -- The army's top speed share for its size, blended between the points of `curve`.
@@ -461,6 +477,8 @@ function Army.updateSoldiers(army: Army, dt: number, settings: Settings, ground:
 		local slot = slots[soldier.slot] or Vector2.zero
 		if soldier.role == "archer" then
 			slot = rearSlot(slot, army.headingX, army.headingZ)
+		elseif soldier.role == "guardian" then
+			slot = frontSlot(slot, army.headingX, army.headingZ)
 		end
 		local tx, tz = center.x + slot.X, center.z + slot.Y
 		if ground then
@@ -515,7 +533,8 @@ function Army.updateSoldiers(army: Army, dt: number, settings: Settings, ground:
 		-- 3. How fast? Close the gap firmly, slowing to a stop on the spot (or at
 		-- striking distance from the enemy, or a step short of the centre).
 		local terrain = if obs then obs.speedFactorAt(soldier.x, soldier.z) else 1
-		local topSpeed = settings.warriorSpeed * (if slotDistance > FAR_BEHIND then settings.catchUpMultiplier else 1) * terrain
+		local roleSpeed = if soldier.role == "guardian" then settings.guardianSpeedMultiplier else 1
+		local topSpeed = settings.warriorSpeed * roleSpeed * (if slotDistance > FAR_BEHIND then settings.catchUpMultiplier else 1) * terrain
 		local speed = topSpeed
 		if engaged then
 			speed = if distance < ENGAGE_STANDOFF then 0 else math.min(topSpeed, (distance - ENGAGE_STANDOFF) * 6 + 12)

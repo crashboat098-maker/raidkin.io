@@ -7,7 +7,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage.Shared.Config)
-local Map = require(script.Parent.Map)
+local Map = require(ReplicatedStorage.Shared.Map)
 
 local Shards = {}
 

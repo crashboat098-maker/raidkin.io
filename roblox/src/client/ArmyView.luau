@@ -9,15 +9,16 @@
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"))
+local Ground = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Ground"))
 
 local S = Config.STUDS_PER_PX
 
 local ArmyView = {}
 
 -- health: 0-100.
-export type SoldierState = { x: number, z: number, yaw: number, moving: boolean, archer: boolean, health: number }
+export type SoldierState = { x: number, z: number, yaw: number, moving: boolean, role: number, health: number }
 -- color: an index into Config.colors, or 0 for neutrals.
-export type ArmyState = { id: number, color: number, cx: number, cz: number, soldiers: { [number]: SoldierState } }
+export type ArmyState = { id: number, color: number, cx: number, cz: number, speed: number?, soldiers: { [number]: SoldierState } }
 
 type Model3 = {
 	model: Model,
@@ -62,13 +63,17 @@ local HIT = Color3.fromRGB(255, 70, 60)
 local FLASH_TIME = 0.15
 local BAR_WIDTH = 1.6
 
--- Shield on the left arm; bow held out on the right.
+-- Shield on the left arm; bow held out on the right; a Guardian's tall tower shield in front.
 local SHIELD_OFFSET = CFrame.new(-0.85, 1, -0.1)
 local BOW_OFFSET = CFrame.new(0.85, 1.1, -0.2)
+local TOWER_OFFSET = CFrame.new(-0.4, 1.1, -0.65)
 -- Health bars float above the head, facing the camera's way (north).
 local BAR_HEIGHT = 3.3
 
-local function modelFor(id: number, color: Color3, archer: boolean): Model3
+-- Classes as the server sends them.
+local ARCHER, GUARDIAN = 1, 2
+
+local function modelFor(id: number, color: Color3, role: number): Model3
 	local m = models[id]
 	if m then
 		return m
@@ -76,11 +81,16 @@ local function modelFor(id: number, color: Color3, archer: boolean): Model3
 	local model = Instance.new("Model")
 	model.Name = "Soldier" .. id
 	local body = newPart("Body", Vector3.new(1.5, 1.8, 0.9), color, model)
-	local head = newPart("Head", Vector3.new(1, 1, 1), SKIN, model)
+	-- Guardians wear a steel helmet.
+	local head = newPart("Head", Vector3.new(1, 1, 1), if role == GUARDIAN then STEEL else SKIN, model)
 	local gear, offset
-	if archer then
+	if role == ARCHER then
 		gear = newPart("Bow", Vector3.new(0.2, 2, 0.3), WOOD, model)
 		offset = BOW_OFFSET
+	elseif role == GUARDIAN then
+		gear = newPart("TowerShield", Vector3.new(1.4, 2.2, 0.25), STEEL, model)
+		gear.Material = Enum.Material.DiamondPlate
+		offset = TOWER_OFFSET
 	else
 		gear = newPart("Shield", Vector3.new(0.2, 1.2, 1), STEEL, model)
 		offset = SHIELD_OFFSET
@@ -144,12 +154,14 @@ function ArmyView.draw(armies: { ArmyState }, t: number)
 		m.seen = false
 	end
 	table.clear(moveParts)
+	-- Everyone stands on the terrain's real surface (see Ground).
+	local ground = Ground.height()
 	table.clear(moveFrames)
 
 	for _, army in armies do
 		local color = if army.color == 0 then Config.neutralColor else (Config.colors[army.color] or Config.colors[1])
 		for id, s in army.soldiers do
-			local m = modelFor(id, color, s.archer)
+			local m = modelFor(id, color, s.role)
 			m.seen = true
 			if s.health ~= m.health then
 				setHealth(m, s.health, t)
@@ -161,7 +173,7 @@ function ArmyView.draw(armies: { ArmyState }, t: number)
 			end
 
 			local bob = if s.moving then math.abs(math.sin(t * 12 + id)) * 0.25 else 0
-			local base = CFrame.new(s.x * S, bob, s.z * S) * CFrame.Angles(0, s.yaw, 0)
+			local base = CFrame.new(s.x * S, ground + bob, s.z * S) * CFrame.Angles(0, s.yaw, 0)
 			table.insert(moveParts, m.body)
 			table.insert(moveFrames, base * CFrame.new(0, 0.9, 0))
 			table.insert(moveParts, m.head)
@@ -172,7 +184,7 @@ function ArmyView.draw(armies: { ArmyState }, t: number)
 				-- Left-aligned: the bar shrinks toward its left end as health drops.
 				local width = m.bar.Size.X
 				table.insert(moveParts, m.bar)
-				table.insert(moveFrames, CFrame.new(s.x * S - BAR_WIDTH / 2 + width / 2, BAR_HEIGHT, s.z * S))
+				table.insert(moveFrames, CFrame.new(s.x * S - BAR_WIDTH / 2 + width / 2, ground + BAR_HEIGHT, s.z * S))
 			end
 		end
 	end

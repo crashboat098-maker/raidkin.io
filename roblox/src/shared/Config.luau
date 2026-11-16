@@ -24,11 +24,12 @@ local Config = {
 	-- Everyone wading through water moves at this share of their speed.
 	water = { slowdown = 0.6 },
 
-	-- How the army's invisible steering point moves (from the web's GameConfig.movement).
+	-- How the army's invisible steering point moves. Like a normal Roblox character it
+	-- starts and stops instantly: full speed (or a standstill) within a single frame.
 	movement = {
 		maxSpeed = 95,
-		acceleration = 1500,
-		deceleration = 1700,
+		acceleration = 20000,
+		deceleration = 20000,
 	},
 
 	army = {
@@ -44,8 +45,10 @@ local Config = {
 		warriorSpeed = 108,
 		-- Extra speed for a soldier that has fallen far behind its spot.
 		catchUpMultiplier = 1.4,
+		-- Guardians walk at this share of warriorSpeed (still a touch faster than the army).
+		guardianSpeedMultiplier = 0.9,
 		-- How quickly a soldier gets up to speed (it turns instantly).
-		warriorAcceleration = 3000,
+		warriorAcceleration = 8000,
 		-- Soldiers gently push apart when closer than this.
 		separationDistance = 10,
 		-- Every army starts as a single soldier.
@@ -136,6 +139,9 @@ local Config = {
 		regenPerSecond = 0.05,
 		-- Archers: less health, shoot arrows from behind the front line.
 		archer = { maxHp = 60, damage = 11, range = 95, attackInterval = 0.9 },
+		-- Guardians (won from castle wheels): heavy armour and a big shield. Lots of
+		-- health, light blows, one swing a second; they hold the front line.
+		guardian = { maxHp = 180, damage = 8, attackInterval = 1.0 },
 		-- Split-off groups hit softer when small: { group size, share of damage }.
 		-- 5 soldiers hit at half damage, 25 or more at full. The main group always hits at full.
 		clusterDamage = { { 5, 0.5 }, { 25, 1 } },
@@ -174,6 +180,22 @@ local Config = {
 		-- A chase that hasn't closed the gap for this long is dropped, and that army ignored for a while.
 		pursuitGiveUp = 7,
 		pursuitIgnore = 15,
+		-- Armies this big go and spin castle wheels that are ready, within this distance.
+		castleMinSize = 6,
+		castleSearchRadius = 1500,
+	},
+
+	-- The three Lucky Spin castles (enchanted forest, volcano, swamp; see the server's Castles).
+	castles = {
+		-- Hold the circle this long (alone; another army pauses it, leaving resets it) to spin the wheel.
+		chargeTime = 45,
+		-- After a spin, the castle rests this long before it can be spun again.
+		cooldown = 60,
+		-- The wheel spins this long before the reward lands, and the result stays up this long.
+		spinTime = 2.6,
+		resultTime = 2.6,
+		-- Who stands in each circle is checked this often (seconds).
+		checkInterval = 0.1,
 	},
 
 	-- New and respawning armies start at least this far from any other army.

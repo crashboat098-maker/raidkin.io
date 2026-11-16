@@ -14,11 +14,14 @@ local Workspace = game:GetService("Workspace")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared:WaitForChild("Config"))
+local Ground = require(Shared:WaitForChild("Ground"))
 local Version = require(Shared:WaitForChild("Version"))
 local ArmyView = require(script.Parent:WaitForChild("ArmyView"))
 local ShardView = require(script.Parent:WaitForChild("ShardView"))
 local BodyView = require(script.Parent:WaitForChild("BodyView"))
 local NameView = require(script.Parent:WaitForChild("NameView"))
+local CastleView = require(script.Parent:WaitForChild("CastleView"))
+local Prediction = require(script.Parent:WaitForChild("Prediction"))
 local Hud = require(script.Parent:WaitForChild("Hud"))
 
 local camera = Workspace.CurrentCamera
@@ -37,6 +40,12 @@ local statsRemote = remotes:WaitForChild("Stats") :: RemoteEvent
 local boardRemote = remotes:WaitForChild("Board") :: RemoteEvent
 local defeatRemote = remotes:WaitForChild("Defeat") :: RemoteEvent
 local respawnRemote = remotes:WaitForChild("Respawn") :: RemoteEvent
+local castlesRemote = remotes:WaitForChild("Castles") :: RemoteEvent
+
+-- The castles: where they are and what's happening at each (see CastleView).
+castlesRemote.OnClientEvent:Connect(function(message)
+	CastleView.apply(message)
+end)
 
 -- Which army is ours (the server tells us with our stats), and every army's name.
 local myId: number? = nil
@@ -58,6 +67,7 @@ statsRemote.OnClientEvent:Connect(function(stats)
 	Hud.show(stats)
 end)
 boardRemote.OnClientEvent:Connect(function(rows)
+	CastleView.setArmies(rows)
 	lastBoard = rows
 	for _, row in rows do
 		names[row.id] = row.name
@@ -80,7 +90,7 @@ local S = Config.STUDS_PER_PX
 type Snapshot = { t: number, armies: { ArmyView.ArmyState } }
 local snapshots: { Snapshot } = {}
 
--- Unpacks the server's flat soldier lists ({ id, x, z, yaw, moving, archer, health, ... }).
+-- Unpacks the server's flat soldier lists ({ id, x, z, yaw, moving, role, health, ... }).
 snapshotRemote.OnClientEvent:Connect(function(message)
 	local armies = {}
 	for _, a in message.armies do
@@ -92,11 +102,11 @@ snapshotRemote.OnClientEvent:Connect(function(message)
 				z = flat[i + 2],
 				yaw = flat[i + 3],
 				moving = flat[i + 4] == 1,
-				archer = flat[i + 5] == 1,
+				role = flat[i + 5],
 				health = flat[i + 6],
 			}
 		end
-		table.insert(armies, { id = a.id, color = a.color, cx = a.cx, cz = a.cz, soldiers = soldiers })
+		table.insert(armies, { id = a.id, color = a.color, cx = a.cx, cz = a.cz, speed = a.speed, soldiers = soldiers })
 	end
 	table.insert(snapshots, { t = message.t, armies = armies })
 	if #snapshots > 10 then
@@ -131,9 +141,10 @@ local function blendedArmies(renderTime: number): { ArmyView.ArmyState }
 		for id, s in army.soldiers do
 			local p = prev and prev.soldiers[id]
 			if p then
-				soldiers[id] = { x = p.x + (s.x - p.x) * a, z = p.z + (s.z - p.z) * a, yaw = s.yaw, moving = s.moving, archer = s.archer, health = s.health }
+				soldiers[id] = { x = p.x + (s.x - p.x) * a, z = p.z + (s.z - p.z) * a, yaw = s.yaw, moving = s.moving, role = s.role, health = s.health }
 			else
-				soldiers[id] = s
+				-- A copy: our own army gets shifted each frame, which must never touch the snapshot.
+				soldiers[id] = { x = s.x, z = s.z, yaw = s.yaw, moving = s.moving, role = s.role, health = s.health }
 			end
 		end
 		local cx = if prev then prev.cx + (army.cx - prev.cx) * a else army.cx
@@ -149,7 +160,8 @@ end
 
 -- Mouse steering ignores the pointer this close to the middle of the screen (pixels).
 local MOUSE_DEADZONE = 25
-local SEND_EVERY = 1 / 20
+-- Steering changes go to the server at once, but at most this often (a moving mouse changes it every frame).
+local SEND_EVERY = 1 / 30
 
 local function readSteering(): (number, number)
 	local x = 0
@@ -177,13 +189,13 @@ local function readSteering(): (number, number)
 end
 
 local lastSentX, lastSentZ, lastSentAt = 0, 0, 0
-local function sendSteering(now: number)
-	if now - lastSentAt < SEND_EVERY then
+local function sendSteering(now: number, x: number, z: number)
+	local changed = x ~= lastSentX or z ~= lastSentZ
+	-- Resend now and then even when unchanged, in case a message was lost.
+	if not changed and now - lastSentAt < 0.5 then
 		return
 	end
-	local x, z = readSteering()
-	-- Resend now and then even when unchanged, in case a message was lost.
-	if x == lastSentX and z == lastSentZ and now - lastSentAt < 0.5 then
+	if changed and now - lastSentAt < SEND_EVERY then
 		return
 	end
 	lastSentX, lastSentZ, lastSentAt = x, z, now
@@ -210,13 +222,21 @@ end)
 -- Camera
 -- ---------------------------------------------------------------------------
 
--- Seen from above and a little south, tilted like the web version's top-down view.
-local CAMERA_PITCH = math.rad(62)
-local cameraDistance = 70
+--[[
+	Like the web version's flat top-down view: looking almost straight down,
+	from far away through a narrow lens, which takes out most of the perspective.
+	ZOOM_OUT keeps the same amount of ground on screen as a normal lens would
+	(the narrower the lens, the further back the camera must be).
+]]
+local CAMERA_PITCH = math.rad(80)
+local FIELD_OF_VIEW = 30
+local ZOOM_OUT = math.tan(math.rad(70 / 2)) / math.tan(math.rad(FIELD_OF_VIEW / 2))
+local cameraDistance = 70 * ZOOM_OUT
 local focus = Vector3.new(Config.world.size * S / 2, 0, Config.world.size * S / 2)
 
 local function updateCamera(army: ArmyView.ArmyState?, dt: number)
 	camera.CameraType = Enum.CameraType.Scriptable
+	camera.FieldOfView = FIELD_OF_VIEW
 	if army then
 		local count = 0
 		local reach = 0
@@ -225,12 +245,12 @@ local function updateCamera(army: ArmyView.ArmyState?, dt: number)
 			reach = math.max(reach, math.sqrt((s.x - army.cx) ^ 2 + (s.z - army.cz) ^ 2))
 		end
 		-- Pull back as the army grows, and far enough to keep every split group on screen.
-		local wanted = math.max(55 + math.sqrt(count) * 6, reach * S * 2.4 + 20)
+		local wanted = math.max(55 + math.sqrt(count) * 6, reach * S * 2.4 + 20) * ZOOM_OUT
 		-- Zooming out reacts faster than zooming back in.
 		local rate = if wanted > cameraDistance then 3 else 1.2
 		cameraDistance += (wanted - cameraDistance) * math.min(1, dt * rate)
 		-- Locked on the army (no trailing), like the web version.
-		focus = Vector3.new(army.cx * S, 0, army.cz * S)
+		focus = Vector3.new(army.cx * S, Ground.height(), army.cz * S)
 	end
 	local offset = Vector3.new(0, math.sin(CAMERA_PITCH), math.cos(CAMERA_PITCH)) * cameraDistance
 	camera.CFrame = CFrame.lookAt(focus + offset, focus)
@@ -240,9 +260,23 @@ end
 -- Every frame
 -- ---------------------------------------------------------------------------
 
+-- The server's latest word on our own army (not blended: the newest snapshot).
+local function latestMine(): ArmyView.ArmyState?
+	local latest = snapshots[#snapshots]
+	if latest then
+		for _, army in latest.armies do
+			if army.id == myId then
+				return army
+			end
+		end
+	end
+	return nil
+end
+
 RunService.RenderStepped:Connect(function(dt)
 	local now = os.clock()
-	sendSteering(now)
+	local steerX, steerZ = readSteering()
+	sendSteering(now, steerX, steerZ)
 
 	local armies = blendedArmies(Workspace:GetServerTimeNow() - Config.INTERPOLATION_S)
 	local mine: ArmyView.ArmyState? = nil
@@ -251,9 +285,27 @@ RunService.RenderStepped:Connect(function(dt)
 			mine = army
 		end
 	end
+
+	-- Our own army moves the moment we steer (see Prediction): draw it where the
+	-- prediction has it, every soldier shifted along with the steering point.
+	local server = latestMine()
+	if mine and server then
+		local px, pz = Prediction.update(math.min(dt, 0.1), steerX, steerZ, server.cx, server.cz, server.speed or Config.movement.maxSpeed, now)
+		local shiftX, shiftZ = px - mine.cx, pz - mine.cz
+		if shiftX * shiftX + shiftZ * shiftZ < 250 * 250 then
+			for _, s in mine.soldiers do
+				s.x += shiftX
+				s.z += shiftZ
+			end
+		end
+		mine.cx, mine.cz = px, pz
+	else
+		Prediction.reset()
+	end
 	updateCamera(mine, dt)
 	ArmyView.draw(armies, now)
 	NameView.draw(armies, names)
+	CastleView.draw(now)
 end)
 
 print(`[{Version.name}] client ready, version {Version.version}`)

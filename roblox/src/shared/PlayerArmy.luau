@@ -113,6 +113,9 @@ export type PlayerArmy = {
 	colorIndex: number,
 	-- The invisible point the player steers. Never has soldiers.
 	lead: Movement.Mover,
+	-- The lead's top speed this update (the largest group's speed, slowed if the army lags):
+	-- players' games use it to move their own army on screen without waiting for the server.
+	leadSpeed: number,
 	headingX: number,
 	headingZ: number,
 	-- The lead's route around obstacles toward where the player steers (its goal: nil when standing still).
@@ -157,6 +160,7 @@ function PlayerArmy.new(id: number, colorIndex: number, x: number, z: number): P
 		id = id,
 		colorIndex = colorIndex,
 		lead = Movement.create(x, z),
+		leadSpeed = Config.movement.maxSpeed,
 		headingX = 0,
 		headingZ = 1,
 		nav = Navigation.newNavigator(),
@@ -831,15 +835,16 @@ function PlayerArmy.update(army: PlayerArmy, steerX: number, steerZ: number, dt:
 
 	-- The lead: player-steered, at the largest group's speed, slowed if the army lags.
 	-- It walks a route around obstacles toward where the player points.
+	army.leadSpeed = armySpeed * leashFactor(army, plan, targets)
 	local sx, sz = Navigation.steerAround(army.nav, world, bounds, army.lead.x, army.lead.z, steerX, steerZ, now)
 	Movement.update(army.lead, sx, sz, dt, {
-		maxSpeed = armySpeed * leashFactor(army, plan, targets),
+		maxSpeed = army.leadSpeed,
 		acceleration = Config.movement.acceleration,
 		deceleration = Config.movement.deceleration,
 	}, bounds, world)
-	local leadSpeed = math.sqrt(army.lead.vx ^ 2 + army.lead.vz ^ 2)
-	if leadSpeed >= 10 then
-		army.headingX, army.headingZ = army.lead.vx / leadSpeed, army.lead.vz / leadSpeed
+	local currentSpeed = math.sqrt(army.lead.vx ^ 2 + army.lead.vz ^ 2)
+	if currentSpeed >= 10 then
+		army.headingX, army.headingZ = army.lead.vx / currentSpeed, army.lead.vz / currentSpeed
 	end
 	-- The lead's breadcrumbs: groups that lose sight of their place follow them.
 	local last = army.trail[#army.trail]

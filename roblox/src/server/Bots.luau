@@ -9,14 +9,14 @@
 	  FLEE     a much stronger army is close (or we're hurt and it's not weaker)
 	  HUNT     a clearly weaker army is in reach (big bots also search further)
 	  FIGHT    a similar-sized army is close and we're healthy
+	  SPIN     hold a nearby castle's circle until its Lucky Spin wheel spins
 	  RECRUIT  a neutral or a revivable body is near (small armies weigh this highest)
 	  GATHER   a soul shard is near (staying away from threats)
 	  RECOVER  hurt: keep away from everyone and gather until healed
 	  EXPLORE  nothing better to do
 
 	Chases that don't close the gap are dropped and that army ignored for a while,
-	so a bot never chases an unreachable army forever. (Castles and the arena
-	come with the real map.)
+	so a bot never chases an unreachable army forever. (The arena comes later.)
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -24,14 +24,15 @@ local Config = require(ReplicatedStorage.Shared.Config)
 local Army = require(ReplicatedStorage.Shared.Army)
 local PlayerArmy = require(ReplicatedStorage.Shared.PlayerArmy)
 local Combat = require(script.Parent.Combat)
-local Map = require(script.Parent.Map)
+local Map = require(ReplicatedStorage.Shared.Map)
+local Castles = require(script.Parent.Castles)
 
 local Bots = {}
 
 local s = Config.bots
 local rng = Random.new()
 
-export type Mode = "explore" | "gather" | "recruit" | "hunt" | "fight" | "flee" | "recover"
+export type Mode = "explore" | "gather" | "recruit" | "hunt" | "fight" | "flee" | "recover" | "spin"
 
 type Pursuit = { rival: Combat.Fighter, bestDistance: number, lastImprovedAt: number }
 
@@ -140,6 +141,32 @@ local function trackPursuit(state: BotState, rival: Rival, now: number): boolean
 		return false
 	end
 	return true
+end
+
+--[[
+	The castle we're charging (stay until it spins), else the nearest ready one
+	in reach, if the army is big enough. A ready castle we're already deep inside
+	without charging is skipped (someone else holds it, or we'd have to step out
+	and back in): the bot moves on.
+]]
+local function castleGoal(bot: Combat.Fighter, mx: number, mz: number, size: number): Castles.Castle?
+	for _, c in Castles.list do
+		if c.state == "ready" and c.charger == bot then
+			return c
+		end
+	end
+	if size < s.castleMinSize then
+		return nil
+	end
+	local best: Castles.Castle? = nil
+	local bestD = math.huge
+	for _, c in Castles.list do
+		local d = dist(mx, mz, c.x, c.z)
+		if c.state == "ready" and d <= s.castleSearchRadius and d > c.radius * 0.6 and d < bestD then
+			best, bestD = c, d
+		end
+	end
+	return best
 end
 
 local function decide(bot: Combat.Fighter, state: BotState, view: View, now: number)
@@ -252,6 +279,22 @@ local function decide(bot: Combat.Fighter, state: BotState, view: View, now: num
 			end
 		end
 		return true
+	end
+
+	-- SPIN: walk into a castle whose wheel is ready and hold the circle until it
+	-- spins, milling about inside rather than walking out.
+	if not injured then
+		local castle = castleGoal(bot, mx, mz, #mine)
+		if castle then
+			state.mode = "spin"
+			if castle.charger == bot then
+				local spread = castle.radius * 0.3
+				setTarget(state, castle.x + rng:NextNumber(-spread, spread), castle.z + rng:NextNumber(-spread, spread), now, mx, mz)
+			else
+				setTarget(state, castle.x, castle.z, now, mx, mz)
+			end
+			return
+		end
 	end
 
 	-- RECRUIT / GATHER. Small armies value recruits most. A full army leaves them for everyone else.

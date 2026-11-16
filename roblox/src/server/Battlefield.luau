@@ -12,7 +12,8 @@
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage.Shared.Config)
-local Map = require(script.Parent.Map)
+local Map = require(ReplicatedStorage.Shared.Map)
+local Ground = require(ReplicatedStorage.Shared.Ground)
 
 local Battlefield = {}
 
@@ -26,8 +27,10 @@ local M = Enum.Material
 -- Terrain material for each web ground tile ('a' + GroundTile value), and
 -- whether it's raised (the impassable forest border and volcano cliffs).
 local GROUND: { [string]: { material: Enum.Material, raised: boolean? } } = {
+	-- Grass, darker grass patches (their own material, so they can have their own
+	-- colour, like the web's soft shading) and dirt patches.
 	a = { material = M.Grass }, b = { material = M.Grass }, c = { material = M.Grass },
-	d = { material = M.LeafyGrass }, e = { material = M.LeafyGrass },
+	d = { material = M.Pavement }, e = { material = M.Pavement },
 	f = { material = M.Ground },
 	g = { material = M.LeafyGrass, raised = true }, h = { material = M.LeafyGrass, raised = true },
 	-- Volcano: ash, scorched ground, cliffs.
@@ -44,33 +47,47 @@ local GROUND: { [string]: { material: Enum.Material, raised: boolean? } } = {
 	x = { material = M.Glacier, raised = true },
 }
 
--- Terrain material colours (one colour per material, map-wide).
+--[[
+	Terrain material colours (one colour per material, map-wide), taken from the
+	web game's palette (src/game/render/Palette.ts): muted, earthy greens and
+	browns, so the Roblox map reads like Raidkin.
+]]
 local function colourTerrain(terrain: Terrain)
-	terrain:SetMaterialColor(M.Grass, Color3.fromRGB(92, 146, 74))
-	terrain:SetMaterialColor(M.LeafyGrass, Color3.fromRGB(56, 104, 52))
-	terrain:SetMaterialColor(M.Ground, Color3.fromRGB(130, 98, 66))
-	terrain:SetMaterialColor(M.Cobblestone, Color3.fromRGB(128, 126, 120))
-	terrain:SetMaterialColor(M.Slate, Color3.fromRGB(88, 84, 80))
-	terrain:SetMaterialColor(M.Basalt, Color3.fromRGB(52, 44, 40))
-	terrain:SetMaterialColor(M.Rock, Color3.fromRGB(96, 80, 70))
-	terrain:SetMaterialColor(M.Limestone, Color3.fromRGB(86, 150, 120))
-	terrain:SetMaterialColor(M.Mud, Color3.fromRGB(70, 60, 40))
-	terrain:SetMaterialColor(M.Asphalt, Color3.fromRGB(72, 84, 52))
-	terrain:SetMaterialColor(M.Salt, Color3.fromRGB(122, 110, 168))
-	terrain:SetMaterialColor(M.Glacier, Color3.fromRGB(150, 170, 230))
+	terrain:SetMaterialColor(M.Grass, Color3.fromHex("4a6636")) -- Palette.grass
+	terrain:SetMaterialColor(M.Pavement, Color3.fromHex("3e582f")) -- Palette.darkGrass
+	terrain:SetMaterialColor(M.LeafyGrass, Color3.fromHex("213b26")) -- Palette.canopy (the forest border)
+	terrain:SetMaterialColor(M.Ground, Color3.fromHex("66553e")) -- Palette.dirt
+	terrain:SetMaterialColor(M.Sandstone, Color3.fromHex("867352")) -- Palette.trail (worn paths)
+	terrain:SetMaterialColor(M.Cobblestone, Color3.fromHex("5f646a")) -- Palette.stone.light (roads)
+	terrain:SetMaterialColor(M.Slate, Color3.fromRGB(72, 68, 66))
+	terrain:SetMaterialColor(M.Basalt, Color3.fromRGB(44, 38, 36))
+	terrain:SetMaterialColor(M.Rock, Color3.fromRGB(80, 68, 60))
+	terrain:SetMaterialColor(M.Limestone, Color3.fromRGB(62, 112, 92))
+	terrain:SetMaterialColor(M.Mud, Color3.fromRGB(60, 52, 36))
+	terrain:SetMaterialColor(M.Asphalt, Color3.fromRGB(58, 70, 44))
+	terrain:SetMaterialColor(M.Salt, Color3.fromRGB(96, 88, 138))
+	terrain:SetMaterialColor(M.Glacier, Color3.fromRGB(130, 150, 210))
 	terrain:SetMaterialColor(M.CrackedLava, Color3.fromRGB(230, 90, 30))
-	terrain.WaterColor = Color3.fromRGB(46, 120, 150)
-	terrain.WaterTransparency = 0.4
+	-- No animated grass blades: they're as tall as a soldier and hid armies and shards.
+	pcall(function()
+		terrain.Decoration = false
+	end)
+	-- The web game's shallow river blue (WaterView.ts), fairly opaque so it reads as a bright river.
+	terrain.WaterColor = Color3.fromHex("4f9fbd")
+	terrain.WaterTransparency = 0.15
+	terrain.WaterReflectance = 0.05
 	terrain.WaterWaveSize = 0.08
 	terrain.WaterWaveSpeed = 6
 end
 
 --[[
-	Four layers of 4-stud cells: y -8..-4 and -4..0 make the ground (its top at
-	y = 0, where everyone stands); 0..4 and 4..8 raise the forest border and cliffs.
-	Water and lava fill the top ground layer, over mud underneath.
+	Four layers of 4-stud cells: y -8..-4 and -4..0 make the ground; 0..4 and
+	4..8 raise the forest border and cliffs. Water and lava fill the top ground
+	layer, over mud underneath. `topFill` is how full the top ground layer is:
+	smooth terrain draws its surface according to how full a cell is, so a
+	partly filled top layer brings the surface down to base level (y = 0).
 ]]
-local function buildTerrain()
+local function buildTerrain(topFill: number)
 	local terrain = Workspace.Terrain
 	terrain:Clear()
 	colourTerrain(terrain)
@@ -99,13 +116,13 @@ local function buildTerrain()
 				mx[1][z] = M.Mud
 				mx[2][z], ox[2][z] = M.Water, 1
 			elseif top == "l" then
-				mx[2][z], ox[2][z] = M.CrackedLava, 1
+				mx[2][z], ox[2][z] = M.CrackedLava, topFill
 			elseif top == "d" then
-				mx[2][z], ox[2][z] = M.Ground, 1
+				mx[2][z], ox[2][z] = M.Sandstone, topFill
 			elseif top == "s" then
-				mx[2][z], ox[2][z] = M.Cobblestone, 1
+				mx[2][z], ox[2][z] = M.Cobblestone, topFill
 			else
-				mx[2][z], ox[2][z] = tile.material, 1
+				mx[2][z], ox[2][z] = tile.material, if tile.raised then 1 else topFill
 				if tile.raised then
 					mx[3][z], ox[3][z] = tile.material, 1
 					mx[4][z], ox[4][z] = tile.material, 0.5
@@ -123,6 +140,85 @@ end
 -- ---------------------------------------------------------------------------
 
 local folder: Folder
+-- How far above y = 0 the terrain's surface really is (see measureGround); every part is lifted by it.
+local lift = 0
+
+--[[
+	Where smooth terrain's surface really is: cast rays straight down onto open
+	ground at a few spots (dry land only) and take the middle answer.
+]]
+local function measureGround(): number?
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Include
+	params.FilterDescendantsInstances = { Workspace.Terrain }
+	params.IgnoreWater = true
+	local rng = Random.new(7)
+	local heights = {}
+	for _ = 1, 15 do
+		local x, z = Map.randomOpenSpot(rng)
+		local hit = Workspace:Raycast(Vector3.new(x * S, 40, z * S), Vector3.new(0, -80, 0), params)
+		if hit then
+			table.insert(heights, hit.Position.Y)
+		end
+	end
+	if #heights == 0 then
+		return nil
+	end
+	table.sort(heights)
+	return heights[(#heights + 1) // 2]
+end
+
+--[[
+	Measure the ground once the terrain has settled: right after it's written,
+	Roblox may not have updated it yet, and the rays find nothing. Waits a frame
+	at a time (at most a second) until they hit.
+]]
+local function settledGround(): number?
+	for _ = 1, 60 do
+		local height = measureGround()
+		if height then
+			return height
+		end
+		task.wait()
+	end
+	return nil
+end
+
+-- Where the water's surface really is (for checking): rays down onto the middle of open water.
+local function measureWater(): string
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Include
+	params.FilterDescendantsInstances = { Workspace.Terrain }
+	params.IgnoreWater = false
+	local overlay: string = Map.data.overlay
+	local cols, rows = Map.cols, Map.rows
+	local heights = {}
+	for row = 1, rows - 2 do
+		for col = 1, cols - 2 do
+			local i = row * cols + col + 1
+			-- A water tile with water on all four sides (not a bank).
+			if string.sub(overlay, i, i) == "w" and string.sub(overlay, i - 1, i - 1) == "w" and string.sub(overlay, i + 1, i + 1) == "w"
+				and string.sub(overlay, i - cols, i - cols) == "w" and string.sub(overlay, i + cols, i + cols) == "w"
+			then
+				local hit = Workspace:Raycast(Vector3.new((col + 0.5) * 4, 40, (row + 0.5) * 4), Vector3.new(0, -80, 0), params)
+				if hit and hit.Material == Enum.Material.Water then
+					table.insert(heights, hit.Position.Y)
+				end
+				if #heights >= 15 then
+					break
+				end
+			end
+		end
+		if #heights >= 15 then
+			break
+		end
+	end
+	if #heights == 0 then
+		return "?"
+	end
+	table.sort(heights)
+	return tostring(math.round(heights[(#heights + 1) // 2] * 100) / 100)
+end
 
 local function part(props: { [string]: any }): BasePart
 	local className = props.ClassName or "Part"
@@ -138,6 +234,8 @@ local function part(props: { [string]: any }): BasePart
 			(p :: any)[key] = value
 		end
 	end
+	-- Stand on the terrain's real surface.
+	p.CFrame += Vector3.new(0, lift, 0)
 	p.Parent = folder
 	return p
 end
@@ -290,7 +388,10 @@ end
 -- Decorations
 -- ---------------------------------------------------------------------------
 
-local TRUNK = rgb(105, 74, 48)
+local TRUNK = Color3.fromHex("3a2c21") -- Palette.wood.mid
+-- Tree crowns and bushes in the web game's deep, cool greens (Palette.treeFoliage, Palette.foliage).
+local LEAVES = { Color3.fromHex("1b3826"), Color3.fromHex("25492f"), Color3.fromHex("305b3a"), Color3.fromHex("3d6e47") }
+local BUSH = { Color3.fromHex("27482a"), Color3.fromHex("335a33"), Color3.fromHex("467243") }
 
 -- A tree: a trunk and a round crown (or a stack for conifers).
 local function tree(x: number, z: number, height: number, crown: number, leaves: Color3, trunk: Color3?, conifer: boolean?)
@@ -311,22 +412,22 @@ end
 
 -- How to draw each kind of decoration (x, z: its foot, in studs; v: its look variant).
 local DECORATIONS: { [string]: (x: number, z: number, v: number) -> () } = {
-	pine = function(x, z) tree(x, z, 4, 5, rgb(40, 90, 56), nil, true) end,
-	largeTree = function(x, z) tree(x, z, 5, 8, rgb(64, 128, 58)) end,
-	elderTree = function(x, z) tree(x, z, 6.5, 10, rgb(50, 110, 50)) end,
-	cypress = function(x, z) tree(x, z, 5, 3.5, rgb(46, 96, 60), nil, true) end,
-	birch = function(x, z) tree(x, z, 5, 5, rgb(140, 190, 90), rgb(230, 226, 214)) end,
-	goldenOak = function(x, z) tree(x, z, 5, 8, rgb(222, 170, 60)) end,
-	twistedYew = function(x, z) tree(x, z, 4.5, 7, rgb(40, 76, 50)) end,
-	willow = function(x, z) tree(x, z, 4.5, 9, rgb(120, 170, 90)) end,
+	pine = function(x, z) tree(x, z, 4, 5, LEAVES[1], nil, true) end,
+	largeTree = function(x, z, v) tree(x, z, 5, 8, LEAVES[2 + v % 3]) end,
+	elderTree = function(x, z) tree(x, z, 6.5, 10, LEAVES[2]) end,
+	cypress = function(x, z) tree(x, z, 5, 3.5, LEAVES[1], nil, true) end,
+	birch = function(x, z) tree(x, z, 5, 5, LEAVES[4], rgb(200, 196, 184)) end,
+	goldenOak = function(x, z) tree(x, z, 5, 8, rgb(170, 132, 52)) end,
+	twistedYew = function(x, z) tree(x, z, 4.5, 7, LEAVES[1]) end,
+	willow = function(x, z) tree(x, z, 4.5, 9, LEAVES[3]) end,
 	moonTree = function(x, z) tree(x, z, 5.5, 8, rgb(150, 170, 230), rgb(200, 200, 220)) end,
 	spiralTree = function(x, z) tree(x, z, 5, 7, rgb(160, 110, 200), rgb(120, 90, 140)) end,
 	swampTree = function(x, z) tree(x, z, 5, 8, rgb(70, 92, 56), rgb(70, 56, 40)) end,
 	deadTree = function(x, z) cylinder(0.7, 5, Vector3.new(x, 2.5, z), rgb(110, 92, 70), M.Wood) end,
 	charredTree = function(x, z) cylinder(0.7, 4.5, Vector3.new(x, 2.25, z), rgb(36, 30, 28), M.Wood) end,
 	scorchedTree = function(x, z) tree(x, z, 4, 4, rgb(150, 70, 30), rgb(40, 32, 28)) end,
-	bush = function(x, z) ball(2.6, Vector3.new(x, 0.9, z), rgb(64, 120, 56)) end,
-	shrub = function(x, z) ball(2, Vector3.new(x, 0.7, z), rgb(80, 130, 60)) end,
+	bush = function(x, z, v) ball(2.6, Vector3.new(x, 0.9, z), BUSH[1 + v % 3]) end,
+	shrub = function(x, z, v) ball(2, Vector3.new(x, 0.7, z), BUSH[1 + v % 3]) end,
 	ashShrub = function(x, z) ball(2, Vector3.new(x, 0.7, z), rgb(100, 96, 90), M.Slate) end,
 	swampBush = function(x, z) ball(2.4, Vector3.new(x, 0.8, z), rgb(90, 100, 56)) end,
 	boulder = function(x, z, v) rock(x, z, 4.5, rgb(120, 118, 112), nil, x + v) end,
@@ -395,7 +496,29 @@ local DECORATIONS: { [string]: (x: number, z: number, v: number) -> () } = {
 
 -- ---------------------------------------------------------------------------
 
+--[[
+	Bright, even midday light like the web game's flat daytime look: soft
+	shadows, plenty of ambient light so nothing goes murky, and no haze (the
+	camera looks down from far away, and haze would wash the map out).
+]]
+local function setLighting()
+	local Lighting = game:GetService("Lighting")
+	Lighting.ClockTime = 13
+	Lighting.Brightness = 2
+	Lighting.Ambient = Color3.fromRGB(100, 100, 100)
+	Lighting.OutdoorAmbient = Color3.fromRGB(150, 150, 150)
+	Lighting.ShadowSoftness = 0.6
+	Lighting.FogEnd = 100000
+	local atmosphere = Lighting:FindFirstChildOfClass("Atmosphere")
+	if atmosphere then
+		atmosphere.Density = 0.05
+		atmosphere.Haze = 0
+		atmosphere.Glare = 0
+	end
+end
+
 function Battlefield.build(): Folder
+	setLighting()
 	-- The new place's default Baseplate and SpawnLocation sit in the middle of the
 	-- battlefield; take them away for this play session (the saved place keeps them).
 	for _, name in { "Baseplate", "SpawnLocation" } do
@@ -408,7 +531,26 @@ function Battlefield.build(): Folder
 	folder = Instance.new("Folder")
 	folder.Name = "Battlefield"
 
-	buildTerrain()
+	-- Smooth terrain draws its surface a little above the cells' top: build it,
+	-- measure how high the surface came out, then rebuild with the top layer only
+	-- partly filled so the surface lands at base level (y = 0). Whatever small
+	-- difference is left, everything is built on the measured surface, and
+	-- players' games are told it (see Ground).
+	buildTerrain(1)
+	local first = settledGround()
+	local surface = first
+	if first and first > 0.1 then
+		buildTerrain(math.clamp(1 - first / 4, 0.05, 1))
+		surface = settledGround()
+	end
+	if not surface then
+		-- Couldn't measure (shouldn't happen): fall back to how high it stood before lowering.
+		surface = first or 0
+		warn("[Battlefield] couldn't measure the ground's surface")
+	end
+	lift = surface :: number
+	Ground.set(lift)
+	print(`[Battlefield] ground surface at y = {math.round(lift * 100) / 100} (before lowering {if first then math.round(first * 100) / 100 else "?"}), water surface at y = {measureWater()}`)
 	for _, s in Map.data.structures do
 		buildStructure(s)
 	end

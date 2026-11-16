@@ -4,6 +4,7 @@
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"))
+local Ground = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Ground"))
 
 local S = Config.STUDS_PER_PX
 local HEIGHT = 7
@@ -59,7 +60,7 @@ function NameView.draw(armies: { { id: number, color: number, cx: number, cz: nu
 			tag.seen = true
 			tag.label.Text = name
 			tag.label.TextColor3 = Config.colors[army.color] or Config.neutralColor
-			tag.anchor.CFrame = CFrame.new(army.cx * S, HEIGHT, army.cz * S)
+			tag.anchor.CFrame = CFrame.new(army.cx * S, Ground.height() + HEIGHT, army.cz * S)
 		end
 	end
 	for id, tag in tags do

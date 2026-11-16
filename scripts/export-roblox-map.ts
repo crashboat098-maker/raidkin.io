@@ -1,6 +1,6 @@
 /**
  * Exports the web game's battlefield (same seed, same generator) as data for
- * the Roblox version: roblox/src/server/MapData.json, which Rojo turns into a
+ * the Roblox version: roblox/src/shared/MapData.json, which Rojo turns into a
  * ModuleScript. Run it again whenever the map generator changes:
  *
  *   npm run roblox:map
@@ -141,5 +141,5 @@ const data = {
 };
 
 const json = JSON.stringify(data);
-writeFileSync('roblox/src/server/MapData.json', json);
+writeFileSync('roblox/src/shared/MapData.json', json);
 console.log(`MapData.json: ${(json.length / 1024).toFixed(0)} KB, ${decorations.length / 5} decorations (${kinds.length} kinds), ${layout.obstacles.length} obstacles, ${layout.structures.length} structures`);

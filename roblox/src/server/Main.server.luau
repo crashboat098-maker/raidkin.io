@@ -28,7 +28,8 @@ local Neutrals = require(script.Parent.Neutrals)
 local Combat = require(script.Parent.Combat)
 local Fallen = require(script.Parent.Fallen)
 local Bots = require(script.Parent.Bots)
-local Map = require(script.Parent.Map)
+local Map = require(ReplicatedStorage.Shared.Map)
+local Castles = require(script.Parent.Castles)
 
 Players.CharacterAutoLoads = false
 Battlefield.build()
@@ -55,6 +56,7 @@ local statsRemote = remote("Stats")
 local boardRemote = remote("Board")
 local defeatRemote = remote("Defeat")
 local respawnRemote = remote("Respawn")
+local castlesRemote = remote("Castles")
 remotes.Parent = ReplicatedStorage
 
 type Resources = {
@@ -118,7 +120,12 @@ local bounds: Movement.Bounds = {
 -- ---------------------------------------------------------------------------
 
 local function maxHpOf(role: Army.Role): number
-	return if role == "archer" then Config.combat.archer.maxHp else Config.combat.maxHp
+	if role == "archer" then
+		return Config.combat.archer.maxHp
+	elseif role == "guardian" then
+		return Config.combat.guardian.maxHp
+	end
+	return Config.combat.maxHp
 end
 
 -- A new soldier at (x, z) joins the army's nearest group.
@@ -336,18 +343,22 @@ shardRemote.OnServerEvent:Connect(function(player)
 end)
 
 --[[
-	A snapshot: { t = server time, armies = { { id, color, cx, cz, soldiers =
-	{ id, x, z, yaw, moving (0/1), archer (0/1), health (0-100), ... } } } }.
+	A snapshot: { t = server time, armies = { { id, color, cx, cz (the steering point),
+	speed (its top speed right now), soldiers =
+	{ id, x, z, yaw, moving (0/1), role (0 Warrior, 1 Archer, 2 Guardian), health (0-100), ... } } } }.
 	Neutrals are sent as one more "army" with id 0 and color 0. Kept flat and
 	rounded so it stays small.
 ]]
-local function packSoldier(flat: { number }, id: number, x: number, z: number, yaw: number, moving: boolean, archer: boolean, health: number)
+-- How each class is sent to players.
+local ROLE_CODE: { [Army.Role]: number } = { warrior = 0, archer = 1, guardian = 2 }
+
+local function packSoldier(flat: { number }, id: number, x: number, z: number, yaw: number, moving: boolean, role: number, health: number)
 	table.insert(flat, id)
 	table.insert(flat, round1(x))
 	table.insert(flat, round1(z))
 	table.insert(flat, math.round(yaw * 100) / 100)
 	table.insert(flat, if moving then 1 else 0)
-	table.insert(flat, if archer then 1 else 0)
+	table.insert(flat, role)
 	table.insert(flat, health)
 end
 
@@ -358,15 +369,15 @@ local function sendSnapshot()
 			local soldiers = PlayerArmy.allSoldiers(c.army)
 			local flat = table.create(#soldiers * 7)
 			for _, s in soldiers do
-				packSoldier(flat, s.id, s.x, s.z, s.yaw, s.moving, s.role == "archer", math.ceil(s.hp / s.maxHp * 100))
+				packSoldier(flat, s.id, s.x, s.z, s.yaw, s.moving, ROLE_CODE[s.role], math.ceil(s.hp / s.maxHp * 100))
 			end
-			table.insert(armies, { id = c.id, color = c.colorIndex, cx = round1(c.army.lead.x), cz = round1(c.army.lead.z), soldiers = flat })
+			table.insert(armies, { id = c.id, color = c.colorIndex, cx = round1(c.army.lead.x), cz = round1(c.army.lead.z), speed = round1(c.army.leadSpeed), soldiers = flat })
 		end
 	end
 	local neutrals = {}
 	for _, n in Neutrals.list do
 		if n.active then
-			packSoldier(neutrals, n.id, n.x, n.z, n.yaw, n.moving, false, 100)
+			packSoldier(neutrals, n.id, n.x, n.z, n.yaw, n.moving, 0, 100)
 		end
 	end
 	table.insert(armies, { id = 0, color = 0, cx = 0, cz = 0, soldiers = neutrals })
@@ -393,6 +404,63 @@ local function sendStats(c: Competitor)
 		-- Seconds until the next group heads back (nil when whole or already regrouping).
 		regroupIn = PlayerArmy.secondsUntilRegroup(c.army, os.clock()),
 	})
+end
+
+-- A castle wheel's reward lands: `count` soldiers of `role` join the army, or (negative) random soldiers leave.
+local function giveAward(c: Competitor, count: number, role: Army.Role)
+	if count > 0 then
+		local spread = Config.army.recruitSpread
+		for _ = 1, count do
+			local x, z = c.army.lead.x + rng:NextNumber(-spread, spread), c.army.lead.z + rng:NextNumber(-spread, spread)
+			-- Never inside a wall: nudge to the nearest free spot (or the army's middle).
+			if Map.obstacles.blockedAt(x, z, 3, 3) then
+				x, z = c.army.lead.x, c.army.lead.z
+			end
+			newSoldier(c, x, z, role)
+		end
+	else
+		for _ = 1, -count do
+			local groups = {}
+			for _, ac in c.army.clusters do
+				if #ac.cluster.soldiers > 0 then
+					table.insert(groups, ac.cluster)
+				end
+			end
+			if #groups == 0 then
+				break
+			end
+			local group = groups[rng:NextInteger(1, #groups)]
+			table.remove(group.soldiers, rng:NextInteger(1, #group.soldiers))
+		end
+		c.statsDirty = true
+	end
+end
+
+--[[
+	The castles for players' games: where each one is, and its state: { name,
+	x, z, radius, ready (0/1), cooldown (s), charger (army id, 0 = none),
+	charged (s), contested (0/1), spin = { id, reward, elapsed, landed, by } or nil }.
+]]
+local function sendCastles()
+	local list = {}
+	for _, c in Castles.list do
+		local spin = c.spin
+		local charger = c.charger :: any
+		local spinner = if spin then spin.fighter :: any else nil
+		table.insert(list, {
+			name = c.name,
+			x = c.x,
+			z = c.z,
+			radius = c.radius,
+			ready = if c.state == "ready" then 1 else 0,
+			cooldown = math.ceil(c.cooldown),
+			charger = if charger then charger.id else 0,
+			charged = math.round(c.charged * 10) / 10,
+			contested = if c.contested then 1 else 0,
+			spin = if spin then { id = spin.id, reward = spin.rewardId, elapsed = spin.elapsed, landed = spin.landed, by = if spinner then spinner.id else 0 } else nil,
+		})
+	end
+	castlesRemote:FireAllClients({ chargeTime = Config.castles.chargeTime, spinTime = Config.castles.spinTime, rewards = Castles.REWARDS, castles = list })
 end
 
 -- The scoreboard: every army, biggest first.
@@ -544,6 +612,15 @@ local function step(now: number)
 	end
 	Combat.regenerate(fighters, now, STEP)
 
+	-- 3b. Castles: charging circles, spinning wheels, rewards landing.
+	local awards, spun = Castles.update(STEP, fighters)
+	for _, award in awards do
+		giveAward(award.fighter :: any, award.count, award.role)
+	end
+	if spun then
+		sendCastles()
+	end
+
 	-- 4. Collect, recruit and revive.
 	for _, c in competitors do
 		if c.alive then
@@ -589,6 +666,9 @@ local function step(now: number)
 				c.focus.CFrame = CFrame.new(c.army.lead.x * Config.STUDS_PER_PX, 0, c.army.lead.z * Config.STUDS_PER_PX)
 			end
 		end
+	end
+	if tick % 6 == 0 then
+		sendCastles()
 	end
 	if tick % 15 == 0 then
 		sendBoard()

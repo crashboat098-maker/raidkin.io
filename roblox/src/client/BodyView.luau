@@ -6,6 +6,7 @@
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"))
+local Ground = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Ground"))
 
 local S = Config.STUDS_PER_PX
 local SKIN = Color3.fromRGB(234, 184, 146)
@@ -55,7 +56,7 @@ function BodyView.apply(message: { added: { number }, awoken: { number }, remove
 			local model = Instance.new("Model")
 			model.Name = "Body" .. id
 			-- Lying on its back: the body flat on the ground, the head at one end.
-			local base = CFrame.new(x * S, 0, z * S) * CFrame.Angles(0, yaw, 0)
+			local base = CFrame.new(x * S, Ground.height(), z * S) * CFrame.Angles(0, yaw, 0)
 			part("Body", Vector3.new(1.5, 0.9, 1.8), Config.colors[color] or Config.neutralColor, base * CFrame.new(0, 0.45, 0), model)
 			part("Head", Vector3.new(1, 1, 1), SKIN, base * CFrame.new(0, 0.5, -1.4), model)
 			setAwake(model, awake)

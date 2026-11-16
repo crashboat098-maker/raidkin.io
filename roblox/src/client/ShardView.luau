@@ -5,6 +5,7 @@
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"))
+local Ground = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Ground"))
 
 local S = Config.STUDS_PER_PX
 local BLUE = Color3.fromRGB(80, 200, 255)
@@ -45,7 +46,7 @@ function ShardView.apply(flat: { number })
 		local green, active = flat[i + 3] == 1, flat[i + 4] == 1
 		local p = crystal(id, green)
 		-- Tilted a little, each its own way, so they look scattered rather than planted.
-		p.CFrame = CFrame.new(x * S, 0.9, z * S) * CFrame.Angles(0, id * 1.7, math.rad(12))
+		p.CFrame = CFrame.new(x * S, Ground.height() + 1.3, z * S) * CFrame.Angles(0, id * 1.7, math.rad(12))
 		p.Transparency = if active then 0 else 1
 	end
 end

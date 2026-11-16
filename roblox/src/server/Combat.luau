@@ -242,10 +242,11 @@ function Combat.resolveAttacks(fighters: { Fighter }, now: number): { Hit }
 					end
 					if target and targetOwner then
 						-- One blow: damage the target, reset the attacker's swing, mark both armies as fighting.
-						local base = (if ranged then settings.archer.damage else settings.damage) * share
+						local guardian = attacker.role == "guardian"
+						local base = (if ranged then settings.archer.damage elseif guardian then settings.guardian.damage else settings.damage) * share
 						local damage = math.round(base * (1 + (rng:NextNumber() * 2 - 1) * settings.damageVariance))
 						target.hp = math.max(0, target.hp - damage)
-						local interval = if ranged then settings.archer.attackInterval else settings.attackInterval
+						local interval = if ranged then settings.archer.attackInterval elseif guardian then settings.guardian.attackInterval else settings.attackInterval
 						attacker.nextAttackAt = now + interval * (0.9 + rng:NextNumber() * 0.2)
 						attackerOwner.lastCombatAt = now
 						targetOwner.lastCombatAt = now
