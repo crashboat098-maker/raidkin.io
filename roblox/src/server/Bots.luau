@@ -26,13 +26,14 @@ local PlayerArmy = require(ReplicatedStorage.Shared.PlayerArmy)
 local Combat = require(script.Parent.Combat)
 local Map = require(ReplicatedStorage.Shared.Map)
 local Castles = require(script.Parent.Castles)
+local Arena = require(script.Parent.Arena)
 
 local Bots = {}
 
 local s = Config.bots
 local rng = Random.new()
 
-export type Mode = "explore" | "gather" | "recruit" | "hunt" | "fight" | "flee" | "recover" | "spin"
+export type Mode = "explore" | "gather" | "recruit" | "hunt" | "fight" | "flee" | "recover" | "spin" | "arena"
 
 type Pursuit = { rival: Combat.Fighter, bestDistance: number, lastImprovedAt: number }
 
@@ -52,6 +53,9 @@ export type BotState = {
 	ignoreUntil: { [Combat.Fighter]: number },
 	-- The army stops growing at this many soldiers (no more shards or recruits).
 	maxSoldiers: number,
+	-- Since when we've held an arena entry circle (nil: not holding one), and until when we leave the arena be.
+	arenaSince: number?,
+	arenaIgnoreUntil: number,
 }
 
 -- What a bot can see of the world.
@@ -75,6 +79,8 @@ function Bots.newState(maxSoldiers: number): BotState
 		pursuit = nil,
 		ignoreUntil = {},
 		maxSoldiers = maxSoldiers,
+		arenaSince = nil,
+		arenaIgnoreUntil = 0,
 	}
 end
 
@@ -169,6 +175,74 @@ local function castleGoal(bot: Combat.Fighter, mx: number, mz: number, size: num
 	return best
 end
 
+--[[
+	Where the arena wants this bot, if anywhere: its entry circle while it queues
+	and while the wheels spin; its opponent during the duel; a free circle to queue
+	in (big enough, healthy, near, and not facing a far stronger army). A bot that
+	waits too long for an opponent gives up and leaves the arena be for a while.
+]]
+local function arenaDuty(bot: Combat.Fighter, state: BotState, mx: number, mz: number, myStrength: number, size: number, injured: boolean, now: number): Vector2?
+	local site = Arena.site
+	if not site then
+		return nil
+	end
+	local mine = 0
+	for i, z in Arena.zones do
+		if z.holder == bot then
+			mine = i
+		end
+	end
+	local function millAbout(z: Arena.ZoneSite): Vector2
+		local r = z.radius * 0.35
+		return Vector2.new(z.x + rng:NextNumber(-r, r), z.z + rng:NextNumber(-r, r))
+	end
+	local phase = Arena.phase
+
+	if mine > 0 and (phase == "fight" or phase == "victory") then
+		local foe = Arena.zones[3 - mine].holder
+		local soldiers = if foe and foe.alive then PlayerArmy.allSoldiers(foe.army) else {}
+		if #soldiers == 0 then
+			return nil
+		end
+		local fx, fz = Army.centroid(soldiers)
+		return Vector2.new(fx, fz)
+	end
+	if mine > 0 and (phase == "countdown" or phase == "spinning") then
+		return millAbout(site.zones[mine])
+	end
+	if phase ~= "open" then
+		state.arenaSince = nil
+		return nil
+	end
+
+	if mine > 0 then
+		local since = state.arenaSince or now
+		state.arenaSince = since
+		if now - since > s.arenaWait then
+			state.arenaSince = nil
+			state.arenaIgnoreUntil = now + s.arenaIgnore
+			return nil
+		end
+		return millAbout(site.zones[mine])
+	end
+	state.arenaSince = nil
+	if now < state.arenaIgnoreUntil or injured or size < s.arenaMinSize then
+		return nil
+	end
+	local best: Vector2? = nil
+	local bestD = s.arenaSearchRadius
+	for i, z in Arena.zones do
+		local zoneSite = site.zones[i]
+		local d = dist(mx, mz, zoneSite.x, zoneSite.z)
+		local rival = Arena.zones[3 - i].holder
+		-- Not a circle someone holds, and not against an army far stronger than us.
+		if not z.holder and not z.contested and d <= bestD and not (rival and Combat.strength(rival) > myStrength * s.fleeRatio) then
+			best, bestD = Vector2.new(zoneSite.x, zoneSite.z), d
+		end
+	end
+	return best
+end
+
 local function decide(bot: Combat.Fighter, state: BotState, view: View, now: number)
 	local mine = PlayerArmy.allSoldiers(bot.army)
 	if #mine == 0 then
@@ -201,6 +275,15 @@ local function decide(bot: Combat.Fighter, state: BotState, view: View, now: num
 		if r.distance <= s.sightRadius then
 			table.insert(visible, r)
 		end
+	end
+
+	-- ARENA: queue in a free entry circle, hold it, and once inside fight to the
+	-- end (a duellist never flees: there's nowhere to go).
+	local duty = arenaDuty(bot, state, mx, mz, myStrength, #mine, injured, now)
+	if duty then
+		state.mode = "arena"
+		setTarget(state, duty.X, duty.Y, now, mx, mz)
+		return
 	end
 
 	-- FLEE: a much stronger army close by, or any non-weaker one while we're hurt.

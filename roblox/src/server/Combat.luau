@@ -38,6 +38,10 @@ export type Death = { soldier: Army.Soldier, owner: Fighter, killer: Fighter? }
 local MOVING_SPEED = 20
 local CELL = 32
 
+-- Set by the server: false for two armies that mustn't fight (an arena match
+-- and anyone outside it). Nil = everyone fights everyone.
+Combat.canFight = nil :: ((Fighter, Fighter) -> boolean)?
+
 -- ---------------------------------------------------------------------------
 -- Finding who's near whom cheaply
 -- ---------------------------------------------------------------------------
@@ -72,6 +76,10 @@ local function nearbyPairs(fighters: { Fighter }, margin: number): { { Extent } 
 	for i = 1, #extents do
 		for j = i + 1, #extents do
 			local a, b = extents[i], extents[j]
+			local allowed = Combat.canFight
+			if allowed and not allowed(a.fighter, b.fighter) then
+				continue
+			end
 			if math.sqrt((a.x - b.x) ^ 2 + (a.z - b.z) ^ 2) <= a.radius + b.radius + margin then
 				table.insert(pairs, { a, b })
 			end
@@ -292,7 +300,8 @@ function Combat.regenerate(fighters: { Fighter }, now: number, dt: number)
 	for _, f in fighters do
 		if f.alive and now - f.lastCombatAt >= settings.regenDelay then
 			for _, s in PlayerArmy.allSoldiers(f.army) do
-				if s.hp > 0 and s.hp < s.maxHp then
+				-- (No healing while standing in lava.)
+				if s.hp > 0 and s.hp < s.maxHp and s.burningUntil <= now then
 					s.hp = math.min(s.maxHp, s.hp + s.maxHp * settings.regenPerSecond * dt)
 				end
 			end

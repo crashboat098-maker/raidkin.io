@@ -1,11 +1,14 @@
 --!strict
 -- Neutral Warriors on the map: walk any of your soldiers up to one and it joins
 -- your army. Ported from the web's Neutrals.ts: village and forest folk who stay
--- near their homes, and lone wanderers who roam further.
+-- near their homes, lone wanderers who roam further, and soldiers an army
+-- surrendered (they walk out to where they were sent, keep their role, can be
+-- recruited by anyone once a short wait is over, and are gone once taken).
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage.Shared.Config)
 local Map = require(ReplicatedStorage.Shared.Map)
+local Army = require(ReplicatedStorage.Shared.Army)
 
 local Neutrals = {}
 
@@ -26,18 +29,28 @@ export type Neutral = {
 	targetX: number?,
 	targetZ: number?,
 	nextWanderAt: number,
+	-- What it joins as (a surrendered Archer stays an Archer; everyone else is a Warrior).
+	role: Army.Role,
+	-- Nobody can recruit it before this time (surrendered soldiers; 0 for everyone else).
+	recruitableAt: number,
+	-- Let go by an army: no home to come back to once recruited.
+	surrendered: boolean,
 }
 
 local settings = Config.neutrals
 local rng = Random.new(1108)
 -- Village folk barely leave their doorstep.
 local VILLAGE_ROAM = 10
+-- How much faster than a stroll a surrendered soldier walks out to where it was sent.
+local SURRENDER_WALK_SPEEDUP = 3
+local nextId = 1_000_000
 
 Neutrals.list = {} :: { Neutral }
 
-local function add(x: number, z: number, roam: number)
-	table.insert(Neutrals.list, {
-			id = 1_000_000 + #Neutrals.list + 1,
+local function add(x: number, z: number, roam: number): Neutral
+	nextId += 1
+	local unit: Neutral = {
+			id = nextId,
 			homeX = x,
 			homeZ = z,
 			roam = roam,
@@ -50,7 +63,27 @@ local function add(x: number, z: number, roam: number)
 			targetX = nil,
 			targetZ = nil,
 			nextWanderAt = rng:NextNumber(0, 3),
-		})
+			role = "warrior",
+			recruitableAt = 0,
+			surrendered = false,
+		}
+	table.insert(Neutrals.list, unit)
+	return unit
+end
+
+--[[
+	A soldier an army let go: it becomes a neutral at (fromX, fromZ), walks out
+	to (toX, toZ) and wanders there. Anyone can recruit it from recruitableAt.
+]]
+function Neutrals.addSurrendered(fromX: number, fromZ: number, toX: number, toZ: number, role: Army.Role, recruitableAt: number, yaw: number)
+	local unit = add(fromX, fromZ, settings.wanderRadius)
+	unit.homeX, unit.homeZ = toX, toZ
+	unit.targetX, unit.targetZ = toX, toZ
+	unit.role = role
+	unit.recruitableAt = recruitableAt
+	unit.nextWanderAt = recruitableAt
+	unit.surrendered = true
+	unit.yaw = yaw
 end
 
 function Neutrals.create()
@@ -76,12 +109,23 @@ end
 function Neutrals.recruitNear(x: number, z: number, now: number): { Neutral }
 	local joined = {}
 	local r2 = settings.recruitRange ^ 2
+	local anySurrendered = false
 	for _, unit in Neutrals.list do
-		if unit.active and (unit.x - x) ^ 2 + (unit.z - z) ^ 2 <= r2 then
+		if unit.active and now >= unit.recruitableAt and (unit.x - x) ^ 2 + (unit.z - z) ^ 2 <= r2 then
 			unit.active = false
 			unit.moving = false
 			unit.respawnAt = now + rng:NextNumber(settings.respawnDelay.min, settings.respawnDelay.max)
 			table.insert(joined, unit)
+			anySurrendered = anySurrendered or unit.surrendered
+		end
+	end
+	-- Surrendered soldiers have no home to refill: they're gone once taken.
+	if anySurrendered then
+		for i = #Neutrals.list, 1, -1 do
+			local unit = Neutrals.list[i]
+			if unit.surrendered and not unit.active then
+				table.remove(Neutrals.list, i)
+			end
 		end
 	end
 	return joined
@@ -145,8 +189,9 @@ function Neutrals.update(now: number, dt: number, players: { Vector2 })
 			unit.moving = false
 			continue
 		end
-		-- Village folk amble; wanderers walk. Water slows them like everyone else.
-		local pace = if unit.roam < settings.wanderRadius then 0.6 else 1
+		-- Village folk amble; wanderers walk; a freshly surrendered soldier walks
+		-- briskly away from the army it left. Water slows them like everyone else.
+		local pace = if now < unit.recruitableAt then SURRENDER_WALK_SPEEDUP elseif unit.roam < settings.wanderRadius then 0.6 else 1
 		local step = math.min(d, settings.wanderSpeed * pace * Map.obstacles.speedFactorAt(unit.x, unit.z) * dt)
 		local x, z, blockedX, blockedZ = Map.obstacles.move(unit.x, unit.z, 3, 3, dx / d * step, dz / d * step)
 		unit.x, unit.z = x, z

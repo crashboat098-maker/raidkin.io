@@ -23,6 +23,10 @@ local Config = {
 
 	-- Everyone wading through water moves at this share of their speed.
 	water = { slowdown = 0.6 },
+	-- Lava rivers can be walked across, but each soldier standing in molten lava
+	-- loses burnDamage health every burnInterval seconds (and doesn't heal
+	-- meanwhile). Bridges are perfectly safe. (From the web's GameConfig.lava.)
+	lava = { burnDamage = 2, burnInterval = 0.5 },
 
 	-- How the army's invisible steering point moves. Like a normal Roblox character it
 	-- starts and stops instantly: full speed (or a standstill) within a single frame.
@@ -118,6 +122,9 @@ local Config = {
 		respawnDelay = { min = 30, max = 45 },
 		-- ...and only refills when no player is this close.
 		respawnPlayerClearance = 160,
+		-- Surrender (Q or right-click): the soldier let go walks this far past where it
+		-- stood, then anyone can recruit it once fallen.dormant has passed.
+		surrenderDistance = 56,
 	},
 
 	-- Combat (from the web's GameConfig.combat; times in seconds). Soldiers fight
@@ -183,6 +190,30 @@ local Config = {
 		-- Armies this big go and spin castle wheels that are ready, within this distance.
 		castleMinSize = 6,
 		castleSearchRadius = 1500,
+		-- Armies this big queue for the Crystal Arena from this far away; one that
+		-- waits arenaWait seconds without an opponent leaves it be for arenaIgnore.
+		arenaMinSize = 8,
+		arenaSearchRadius = 1600,
+		arenaWait = 60,
+		arenaIgnore = 90,
+	},
+
+	-- The Crystal Arena, a 1v1 ring in the crystal biome (see the server's Arena;
+	-- from the web's GameConfig.arena, in seconds).
+	arena = {
+		-- Hold an entry zone alone this long to qualify.
+		qualifyTime = 10,
+		countdownTime = 3,
+		spinTime = 2.6,
+		-- The wheel results stay up this long before the gates open.
+		resultTime = 1.5,
+		-- A fight still going after this long ends: the bigger army wins.
+		maxFightTime = 180,
+		-- The winner is announced for this long, then let out.
+		victoryTime = 3.5,
+		-- Then the arena rests this long before it opens again.
+		cooldownTime = 15,
+		checkInterval = 0.1,
 	},
 
 	-- The three Lucky Spin castles (enchanted forest, volcano, swamp; see the server's Castles).

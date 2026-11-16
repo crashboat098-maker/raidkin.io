@@ -88,7 +88,7 @@ function Hud.show(stats: Stats)
 			split ..= string.format(" (REGROUP IN %d)", math.ceil(stats.regroupIn))
 		end
 	elseif stats.army >= 2 then
-		split = "   ·   SPACE TO SPLIT"
+		split = "   ·   SPACE SPLIT   ·   Q SURRENDER"
 	end
 	label.Text = string.format(
 		'<font color="#50c8ff">◆</font> SHARDS %d   ·   NEXT WARRIOR %s %d/%d   ·   <font color="#5aeb78">◆</font> ARCHER %s %d/%d   ·   ARMY %d%s',

@@ -14,6 +14,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage.Shared.Config)
 local Map = require(ReplicatedStorage.Shared.Map)
 local Ground = require(ReplicatedStorage.Shared.Ground)
+local ArtIds = require(ReplicatedStorage.Shared.ArtIds)
 
 local Battlefield = {}
 
@@ -530,6 +531,15 @@ function Battlefield.build(): Folder
 
 	folder = Instance.new("Folder")
 	folder.Name = "Battlefield"
+
+	-- With the web game's real artwork uploaded (see ArtIds), players' games draw
+	-- the whole battlefield from it: no Terrain or 3D scenery, ground at y = 0.
+	if ArtIds.ready then
+		Ground.set(0)
+		print("[Battlefield] drawing the web game's pixel art (no Terrain)")
+		folder.Parent = Workspace
+		return folder
+	end
 
 	-- Smooth terrain draws its surface a little above the cells' top: build it,
 	-- measure how high the surface came out, then rebuild with the top layer only

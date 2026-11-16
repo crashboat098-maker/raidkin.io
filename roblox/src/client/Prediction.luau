@@ -36,6 +36,14 @@ local mover: Movement.Mover = Movement.create(0, 0)
 local nav = Navigation.newNavigator()
 local ready = false
 
+-- Where our army's steering point is drawn right now (nil before the first update).
+function Prediction.position(): (number?, number?)
+	if not ready then
+		return nil, nil
+	end
+	return mover.x, mover.z
+end
+
 -- Forget the prediction (beaten, or not playing): the next update starts from the server's position.
 function Prediction.reset()
 	ready = false
@@ -68,7 +76,9 @@ function Prediction.update(dt: number, steerX: number, steerZ: number, serverX: 
 	local targetZ = serverZ + dz * speed * LEAD_TIME
 	local ex, ez = targetX - mover.x, targetZ - mover.z
 	local err = math.sqrt(ex * ex + ez * ez)
-	if err > SNAP then
+	-- A big gap, or a wall between us and the server's word (moved into or out of
+	-- the arena): jump there rather than glide through the wall.
+	if err > SNAP or (err > 40 and not Navigation.hasClearPath(Map.obstacles, mover.x, mover.z, targetX, targetZ)) then
 		mover.x, mover.z = targetX, targetZ
 	elseif length > 0 then
 		if err > WOBBLE then

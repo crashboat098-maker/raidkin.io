@@ -50,6 +50,10 @@ export type Soldier = {
 	-- An enemy to step toward and fight this update (nil = keep formation).
 	engageX: number?,
 	engageZ: number?,
+	-- Standing in lava: burns until this time (no healing meanwhile), and when it
+	-- next takes a burn (0 = not in lava).
+	burningUntil: number,
+	nextBurnAt: number,
 
 	-- Finding the way (see Route): the current plan and when to re-plan it, when
 	-- it was last checked for being stuck (and where it was), and since when it's
@@ -57,6 +61,8 @@ export type Soldier = {
 	route: Route,
 	nextThinkAt: number,
 	nextStuckCheckAt: number,
+	-- How long it has been pressing against a wall while trying to walk (seconds).
+	wallTime: number,
 	lastCheckX: number,
 	lastCheckZ: number,
 	lostSince: number,
@@ -85,8 +91,14 @@ export type Settings = {
 	minSpeedMultiplier: number,
 }
 
--- How hard a soldier closes in on its formation spot (per second, times the distance).
-local SETTLE_RATE = 10
+-- Soldiers head straight for their spot: at least FOLLOW_BOOST times the
+-- army's speed (so they keep pace with no lag), and FOLLOW_GAIN times the gap
+-- when further off (so they catch up fast after a turn), never past it.
+-- The same rule as the web game (and the original Raidkin).
+local FOLLOW_BOOST = 1.45
+local FOLLOW_GAIN = 3.5
+-- Pressing against a wall this long (seconds) while trying to walk sends a soldier looking for a way round.
+local WALL_STUCK = 0.25
 -- A soldier this far from its spot counts as fallen behind and may run faster.
 local FAR_BEHIND = 48
 -- Fighting soldiers stop this close to their enemy (inside striking range).
@@ -213,11 +225,14 @@ function Army.addSoldier(army: Army, id: number, x: number, z: number, role: Rol
 		hp = hp,
 		maxHp = hp,
 		nextAttackAt = 0,
+		burningUntil = 0,
+		nextBurnAt = 0,
 		engageX = nil,
 		engageZ = nil,
 		route = { mode = "slot", index = 1, points = nil },
 		nextThinkAt = 0,
 		nextStuckCheckAt = 0,
+		wallTime = 0,
 		lastCheckX = x,
 		lastCheckZ = z,
 		lostSince = 0,
@@ -530,8 +545,8 @@ function Army.updateSoldiers(army: Army, dt: number, settings: Settings, ground:
 		local toX, toZ = gx - soldier.x, gz - soldier.z
 		local distance = math.sqrt(toX * toX + toZ * toZ)
 
-		-- 3. How fast? Close the gap firmly, slowing to a stop on the spot (or at
-		-- striking distance from the enemy, or a step short of the centre).
+		-- 3. How fast? Straight to my spot without overshooting it (see FOLLOW_BOOST),
+		-- or to striking distance from the enemy, or a step short of the centre.
 		local terrain = if obs then obs.speedFactorAt(soldier.x, soldier.z) else 1
 		local roleSpeed = if soldier.role == "guardian" then settings.guardianSpeedMultiplier else 1
 		local topSpeed = settings.warriorSpeed * roleSpeed * (if slotDistance > FAR_BEHIND then settings.catchUpMultiplier else 1) * terrain
@@ -539,37 +554,43 @@ function Army.updateSoldiers(army: Army, dt: number, settings: Settings, ground:
 		if engaged then
 			speed = if distance < ENGAGE_STANDOFF then 0 else math.min(topSpeed, (distance - ENGAGE_STANDOFF) * 6 + 12)
 		elseif arriving then
-			speed = if distance < 2.5 then 0 else math.min(topSpeed, distance * SETTLE_RATE)
+			speed = math.min(distance / math.max(dt, 1e-4), math.max(topSpeed, centerSpeed * FOLLOW_BOOST, distance * FOLLOW_GAIN))
 		elseif soldier.route.mode == "center" then
 			speed = if distance < CENTER_STANDOFF then 0 else math.min(topSpeed, (distance - CENTER_STANDOFF) * 5 + 10)
 		end
 		local desiredX = if distance > 0.01 then toX / distance * speed else 0
 		local desiredZ = if distance > 0.01 then toZ / distance * speed else 0
 
-		if arriving and not engaged then
-			-- Holding formation: move WITH the centre, plus the correction toward the spot
-			-- (otherwise soldiers only chase their spot and trail behind it).
-			desiredX += center.vx
-			desiredZ += center.vz
-			local cap = topSpeed * settings.catchUpMultiplier
-			local desiredSpeed = math.sqrt(desiredX * desiredX + desiredZ * desiredZ)
-			if desiredSpeed > cap then
-				desiredX *= cap / desiredSpeed
-				desiredZ *= cap / desiredSpeed
-			end
-		end
-
-		-- 4. Personal space: much weaker while travelling or fighting, so soldiers can
-		-- pass gaps in single file and press in.
+		-- 4. Personal space: a nudge apart only when soldiers actually overlap; weaker
+		-- while travelling or fighting, so soldiers can pass gaps in single file and press in.
 		local pushX, pushZ = separation(soldier, army.soldiers, settings.separationDistance)
-		local push = if arriving then 1 else 0.25
+		local push = if arriving then 0.6 else 0.25
 		desiredX += pushX * topSpeed * push
 		desiredZ += pushZ * topSpeed * push
 
-		-- 5. Turn to the desired direction at once; only the speed eases. Move, sliding along obstacles.
+		-- 5. Turn to the desired direction at once; only the speed eases. Move.
+		-- Walking into a wall, the blocked part of the step slides along it toward
+		-- the goal (head-on: half the soldiers go each way), so nobody stands
+		-- pressing into a wall.
 		soldier.vx, soldier.vz = Movement.steerVelocity(soldier.vx, soldier.vz, desiredX, desiredZ, settings.warriorAcceleration * dt)
+		local hitWall = false
 		if obs then
-			local x, z, blockedX, blockedZ = obs.move(soldier.x, soldier.z, 3, 3, soldier.vx * dt, soldier.vz * dt)
+			local stepX, stepZ = soldier.vx * dt, soldier.vz * dt
+			local x, z, blockedX, blockedZ = obs.move(soldier.x, soldier.z, 3, 3, stepX, stepZ)
+			hitWall = blockedX or blockedZ
+			if hitWall and not engaged and distance > 2 and blockedX ~= blockedZ then
+				local side = if soldier.id % 2 == 0 then 1 else -1
+				local alongX, alongZ = 0, 0
+				if blockedX then
+					alongZ = (if math.abs(toZ) > 2 then math.sign(toZ) else side) * math.abs(stepX)
+				else
+					alongX = (if math.abs(toX) > 2 then math.sign(toX) else side) * math.abs(stepZ)
+				end
+				local sx, sz, slidBlockedX, slidBlockedZ = obs.move(x, z, 3, 3, alongX, alongZ)
+				x, z = sx, sz
+				blockedX = blockedX or slidBlockedX
+				blockedZ = blockedZ or slidBlockedZ
+			end
 			soldier.x, soldier.z = x, z
 			if blockedX then
 				soldier.vx = 0
@@ -595,6 +616,19 @@ function Army.updateSoldiers(army: Army, dt: number, settings: Settings, ground:
 		soldier.moving = ownSpeed > 8
 
 		if ground then
+			-- Held up by a wall for a moment (its spot or the next breadcrumb is round a
+			-- corner it can't slide past)? Search for a way round right away.
+			soldier.wallTime = if hitWall and not engaged and speed > 10 then soldier.wallTime + dt else math.max(0, soldier.wallTime - dt)
+			if soldier.wallTime > WALL_STUCK and soldier.route.mode ~= "detour" and takeDetourSearch(now) then
+				soldier.wallTime = 0
+				local detour = Navigation.findDetour(ground.obstacles, ground.bounds, soldier.x, soldier.z, tx, tz, SOLDIER_DETOUR_VISITS)
+					or Navigation.findDetour(ground.obstacles, ground.bounds, soldier.x, soldier.z, center.x, center.z, SOLDIER_DETOUR_VISITS)
+				if detour and #detour > 0 then
+					soldier.route = { mode = "detour", index = 1, points = detour }
+					soldier.nextThinkAt = now + 1 -- commit to it for a moment
+				end
+			end
+
 			-- 7. Stuck while travelling (jammed in a gap, or a detour that didn't work
 			-- out)? Search for a fresh detour from here. Only a wall in the way calls for
 			-- one: when the straight line is clear, it's other soldiers in the way.

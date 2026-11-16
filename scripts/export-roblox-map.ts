@@ -137,7 +137,15 @@ const data = {
     villages: layout.villages.map((v) => ({ x: round(v.center.x), y: round(v.center.y), radius: v.radius, style: v.style ?? 'medieval', homes: list(v.villagerHomes.flatMap((h) => [h.x, h.y])) })),
     folkHomes: list(layout.folkHomes.flatMap((h) => [h.x, h.y])),
     castles: layout.castles.map((c) => ({ name: c.name, biome: c.biome, x: round(c.x), y: round(c.y), radius: c.radius })),
-    arena: layout.arena ? { x: round(layout.arena.center.x), y: round(layout.arena.center.y), radius: layout.arena.radius, wall: layout.arena.wall } : null,
+    arena: layout.arena ? {
+        x: round(layout.arena.center.x), y: round(layout.arena.center.y), radius: layout.arena.radius, wall: layout.arena.wall,
+        // The two entry zones: where to stand to qualify, the gate, where each side starts inside, where the winner is let out, and its wheel.
+        zones: layout.arena.zones.map((z) => ({
+            x: round(z.x), y: round(z.y), radius: z.radius, dirX: z.dir.x, dirY: z.dir.y,
+            gateX: round(z.gate.x), gateY: round(z.gate.y), insideX: round(z.inside.x), insideY: round(z.inside.y),
+            exitX: round(z.exit.x), exitY: round(z.exit.y), wheelX: round(z.wheel.x), wheelY: round(z.wheel.y),
+        })),
+    } : null,
 };
 
 const json = JSON.stringify(data);

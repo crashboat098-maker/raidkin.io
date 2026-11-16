@@ -3,7 +3,8 @@
 --
 -- Every army belongs to a "competitor": a player or a bot. Players don't get a
 -- Roblox avatar: each player IS an army. Their game sends which way they steer
--- ("Steer") and when they split ("Split"); bots steer themselves (see Bots).
+-- ("Steer"), when they split ("Split") and when they let a soldier go
+-- ("Surrender"); bots steer themselves (see Bots).
 -- The server moves every army 30 times a second, runs the fighting, and sends a
 -- snapshot of all armies and neutrals 15 times a second ("Snapshot"). Shards
 -- and fallen bodies change only now and then, so players get them once and then
@@ -22,6 +23,7 @@ local Movement = require(Shared.Movement)
 local Army = require(Shared.Army)
 local PlayerArmy = require(Shared.PlayerArmy)
 local Version = require(Shared.Version)
+local Navigation = require(Shared.Navigation)
 local Battlefield = require(script.Parent.Battlefield)
 local Shards = require(script.Parent.Shards)
 local Neutrals = require(script.Parent.Neutrals)
@@ -30,6 +32,10 @@ local Fallen = require(script.Parent.Fallen)
 local Bots = require(script.Parent.Bots)
 local Map = require(ReplicatedStorage.Shared.Map)
 local Castles = require(script.Parent.Castles)
+local Arena = require(script.Parent.Arena)
+
+-- Arena duellists only fight each other: nobody outside helps or harms them.
+Combat.canFight = Arena.canFight :: any
 
 Players.CharacterAutoLoads = false
 Battlefield.build()
@@ -49,6 +55,8 @@ local function remote(name: string): RemoteEvent
 end
 local steerRemote = remote("Steer")
 local splitRemote = remote("Split")
+local surrenderRemote = remote("Surrender")
+local arenaRemote = remote("Arena")
 local snapshotRemote = remote("Snapshot")
 local shardRemote = remote("ShardSync")
 local bodiesRemote = remote("Bodies")
@@ -78,9 +86,14 @@ type Competitor = {
 	lastCombatAt: number,
 	holdBack: boolean,
 	alive: boolean,
+	-- Counts up each time the army (re)starts, so the arena can tell a beaten and
+	-- restarted army from the one that qualified.
+	lives: number,
 	kills: number,
 	steerX: number,
 	steerZ: number,
+	-- When it last let a soldier go (holding Q can't empty an army in a blink).
+	lastSurrenderAt: number,
 	resources: Resources,
 	-- Biggest the army has been this life (shown when beaten).
 	bestArmy: number,
@@ -161,6 +174,7 @@ local function startArmy(c: Competitor)
 	local x, z = spawnSpot()
 	c.army = PlayerArmy.new(c.id, c.colorIndex, x, z)
 	c.alive = true
+	c.lives += 1
 	c.kills = 0
 	c.lastCombatAt = 0
 	c.holdBack = false
@@ -183,9 +197,11 @@ local function newCompetitor(name: string, colorIndex: number): Competitor
 		lastCombatAt = 0,
 		holdBack = false,
 		alive = false,
+		lives = 0,
 		kills = 0,
 		steerX = 0,
 		steerZ = 0,
+		lastSurrenderAt = 0,
 		resources = { shards = 0, recruitProgress = 0, green = 0, archerProgress = 0 },
 		bestArmy = 0,
 		statsDirty = true,
@@ -285,6 +301,59 @@ splitRemote.OnServerEvent:Connect(function(player, x: unknown, z: unknown)
 	end
 end)
 
+--[[
+	Q or right-click: one soldier leaves the army toward (x, z), where they
+	point (zero = the way the army is heading). The one furthest that way goes,
+	walks a little further out, and turns neutral: anyone can recruit it (its old
+	army too) once Config.fallen.dormant has passed. The last soldier stays.
+]]
+local SURRENDER_EVERY = 0.12
+local function surrender(c: Competitor, aimX: number, aimZ: number, now: number): boolean
+	local army = c.army
+	if PlayerArmy.totalSoldiers(army) <= 1 then
+		return false
+	end
+	local length = math.sqrt(aimX * aimX + aimZ * aimZ)
+	local dx, dz = army.headingX, army.headingZ
+	if length > 0.001 then
+		dx, dz = aimX / length, aimZ / length
+	elseif dx == 0 and dz == 0 then
+		dx = 1
+	end
+
+	local fromX, fromZ = army.lead.x, army.lead.z
+	local pickList: { Army.Soldier }? = nil
+	local pickIndex = 0
+	local best = -math.huge
+	for _, ac in army.clusters do
+		for i, s in ac.cluster.soldiers do
+			local ahead = (s.x - fromX) * dx + (s.z - fromZ) * dz
+			if ahead > best then
+				best, pickList, pickIndex = ahead, ac.cluster.soldiers, i
+			end
+		end
+	end
+	if not pickList then
+		return false
+	end
+	local s = table.remove(pickList, pickIndex) :: Army.Soldier
+	local reach = Config.neutrals.surrenderDistance
+	local toX, toZ = Navigation.findFreeSpotNear(Map.obstacles, bounds, s.x + dx * reach, s.z + dz * reach, 30)
+	Neutrals.addSurrendered(s.x, s.z, toX or s.x, toZ or s.z, s.role, now + Config.fallen.dormant, math.atan2(-dx, -dz))
+	return true
+end
+
+surrenderRemote.OnServerEvent:Connect(function(player, x: unknown, z: unknown)
+	local c = byPlayer[player]
+	local now = os.clock()
+	if c and c.alive and validNumbers(x, z) and now - c.lastSurrenderAt >= SURRENDER_EVERY then
+		c.lastSurrenderAt = now
+		if surrender(c, x :: number, z :: number, now) then
+			c.statsDirty = true
+		end
+	end
+end)
+
 -- PLAY AGAIN after being beaten.
 respawnRemote.OnServerEvent:Connect(function(player)
 	local c = byPlayer[player]
@@ -377,7 +446,7 @@ local function sendSnapshot()
 	local neutrals = {}
 	for _, n in Neutrals.list do
 		if n.active then
-			packSoldier(neutrals, n.id, n.x, n.z, n.yaw, n.moving, 0, 100)
+			packSoldier(neutrals, n.id, n.x, n.z, n.yaw, n.moving, ROLE_CODE[n.role], 100)
 		end
 	end
 	table.insert(armies, { id = 0, color = 0, cx = 0, cz = 0, soldiers = neutrals })
@@ -461,6 +530,81 @@ local function sendCastles()
 		})
 	end
 	castlesRemote:FireAllClients({ chargeTime = Config.castles.chargeTime, spinTime = Config.castles.spinTime, rewards = Castles.REWARDS, castles = list })
+end
+
+--[[
+	Move a whole army to (x, z) at once (into the arena, or the winner back
+	out), gathered into one group in formation. Inside the arena everyone is
+	kept on its floor; outside, on open ground.
+]]
+local function moveArmy(c: Competitor, x: number, z: number, inside: boolean)
+	local soldiers = PlayerArmy.allSoldiers(c.army)
+	local army = PlayerArmy.new(c.id, c.colorIndex, x, z)
+	local cluster = army.clusters[1].cluster
+	local slots = Army.formationSlots(Config.army.formationSpacing, math.max(30, #soldiers))
+	local site = Arena.site
+	for i, s in soldiers do
+		local slot = slots[i] or Vector2.zero
+		local px, pz = x + slot.X, z + slot.Y
+		if inside and site then
+			local dx, dz = px - site.x, pz - site.z
+			local d = math.sqrt(dx * dx + dz * dz)
+			local max = site.radius - 12
+			if d > max then
+				px, pz = site.x + dx / d * max, site.z + dz / d * max
+			end
+		else
+			local fx, fz = Navigation.findFreeSpotNear(Map.obstacles, bounds, px, pz, 40)
+			if fx and fz then
+				px, pz = fx, fz
+			end
+		end
+		s.x, s.z, s.vx, s.vz = px, pz, 0, 0
+		s.engageX, s.engageZ = nil, nil
+		s.slot = i
+		s.route = { mode = "slot", index = 1, points = nil }
+		s.lastCheckX, s.lastCheckZ = px, pz
+		s.wallTime = 0
+	end
+	cluster.soldiers = soldiers
+	c.army = army
+	c.statsDirty = true
+end
+
+--[[
+	The arena for players' games: { phase, phaseTime, matchId, winner (army id),
+	zones = { { holder (army id), held, qualified, contested, outcome } } }, plus
+	the timings and wheel outcomes so the wheels can spin in step.
+]]
+local lastArenaPhase = ""
+local function sendArena()
+	if not Arena.site then
+		return
+	end
+	local zones = {}
+	for _, z in Arena.zones do
+		local holder = z.holder :: any
+		table.insert(zones, {
+			holder = if holder then holder.id else 0,
+			held = math.round(z.held * 10) / 10,
+			qualified = if z.qualified then 1 else 0,
+			contested = if z.contested then 1 else 0,
+			outcome = z.outcome or 0,
+		})
+	end
+	local winner = Arena.winner :: any
+	arenaRemote:FireAllClients({
+		phase = Arena.phase,
+		phaseTime = math.round(Arena.phaseTime * 10) / 10,
+		matchId = Arena.matchId,
+		winner = if winner then winner.id else 0,
+		zones = zones,
+		qualifyTime = Config.arena.qualifyTime,
+		countdownTime = Config.arena.countdownTime,
+		spinTime = Config.arena.spinTime,
+		cooldownTime = Config.arena.cooldownTime,
+		outcomes = Arena.OUTCOMES,
+	})
 end
 
 -- The scoreboard: every army, biggest first.
@@ -548,7 +692,7 @@ local function collectAndRecruit(c: Competitor, now: number, changedShards: { Sh
 		for _, s in table.clone(soldiers) do
 			if neutralsNear then
 				for _, unit in Neutrals.recruitNear(s.x, s.z, now) do
-					newSoldier(c, unit.x, unit.z, "warrior")
+					newSoldier(c, unit.x, unit.z, unit.role)
 				end
 			end
 			if bodiesReady then
@@ -565,6 +709,30 @@ end
 -- ---------------------------------------------------------------------------
 
 local STEP = 1 / Config.TICK_HZ
+
+-- Every soldier standing in a lava river (not on a bridge) loses a little
+-- health every burnInterval, from the moment it steps in. Only that soldier is
+-- hurt, never the rest of its army. Returns whether anyone was burnt.
+local function burnInLava(now: number): boolean
+	local burnt = false
+	for _, c in competitors do
+		if c.alive then
+			for _, s in PlayerArmy.allSoldiers(c.army) do
+				if not Map.inLava(s.x, s.z) then
+					s.nextBurnAt = 0
+				else
+					s.burningUntil = now + Config.lava.burnInterval
+					if now >= s.nextBurnAt then
+						s.hp -= Config.lava.burnDamage
+						s.nextBurnAt = now + Config.lava.burnInterval
+						burnt = true
+					end
+				end
+			end
+		end
+	end
+	return burnt
+end
 local pending = 0
 local tick = 0
 
@@ -601,9 +769,10 @@ local function step(now: number)
 		end
 	end
 
-	-- 3. Blows land; the fallen leave bodies.
+	-- 3. Blows land and lava burns; the fallen leave bodies.
 	local hits = Combat.resolveAttacks(fighters, now)
-	if #hits > 0 then
+	local burnt = burnInLava(now)
+	if #hits > 0 or burnt then
 		for _, death in Combat.removeDead(fighters, hits) do
 			local owner = death.owner :: any
 			Fallen.add(death.soldier, owner.colorIndex, now)
@@ -619,6 +788,31 @@ local function step(now: number)
 	end
 	if spun then
 		sendCastles()
+	end
+
+	-- 3c. The arena: entry zones, countdown, wheels, the duel. Wheel rewards are
+	-- Warriors or losses (never the last soldier); armies are moved in when the
+	-- gates open, and the winner out.
+	local arena = Arena.update(STEP, fighters)
+	for _, award in arena.awards do
+		local c = award.fighter :: any
+		local count = math.max(award.count, -(PlayerArmy.totalSoldiers(c.army) - 1))
+		if count ~= 0 then
+			giveAward(c, count, "warrior")
+		end
+	end
+	for _, move in arena.moves do
+		moveArmy(move.fighter :: any, move.x, move.z, move.inside)
+	end
+	for _, loser in arena.forfeits do
+		for _, ac in loser.army.clusters do
+			table.clear(ac.cluster.soldiers)
+		end
+		(loser :: any).statsDirty = true
+	end
+	if Arena.phase ~= lastArenaPhase then
+		lastArenaPhase = Arena.phase
+		sendArena()
 	end
 
 	-- 4. Collect, recruit and revive.
@@ -669,6 +863,7 @@ local function step(now: number)
 	end
 	if tick % 6 == 0 then
 		sendCastles()
+		sendArena()
 	end
 	if tick % 15 == 0 then
 		sendBoard()
