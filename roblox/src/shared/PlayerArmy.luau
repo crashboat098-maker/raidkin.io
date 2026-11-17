@@ -29,6 +29,8 @@ local split = settings.split
 
 -- A group with a smaller one heading back to merge into it slows to this share of its speed.
 local MERGE_WAIT_SPEED = 0.5
+-- A launching group slows down over its last this many px to its launch spot.
+local LAUNCH_EASE = 40
 
 -- The solid things on the map (an open field until the server sets the real map).
 local world: Obstacles.Obstacles = Obstacles.none()
@@ -80,10 +82,13 @@ export type ArmyCluster = {
 	parentId: number,
 	-- When this group was last split (its regroup clock counts from here).
 	splitAt: number,
-	-- Until this time it's shooting out after a split (0 = not launching), and where to.
+	-- Until this time it's shooting out after a split (0 = not launching), and where
+	-- to: this far from the group it split from (launchFrom), measured from that group
+	-- as it moves, so the leap is the same length marching or standing still.
 	launchUntil: number,
-	launchX: number,
-	launchZ: number,
+	launchOffX: number,
+	launchOffZ: number,
+	launchFrom: Army.Army?,
 	-- How its centre finds its way to its place in the army (re-planned a few times a second).
 	route: FollowRoute,
 	nextPlanAt: number,
@@ -143,8 +148,9 @@ local function wrap(cluster: Army.Army, parentId: number, splitAt: number): Army
 		parentId = parentId,
 		splitAt = splitAt,
 		launchUntil = 0,
-		launchX = 0,
-		launchZ = 0,
+		launchOffX = 0,
+		launchOffZ = 0,
+		launchFrom = nil,
 		route = { mode = "direct", index = 1, shifts = 0, points = nil },
 		nextPlanAt = 0,
 		aim = nil,
@@ -417,7 +423,10 @@ function PlayerArmy.split(army: PlayerArmy, now: number, aimX: number, aimZ: num
 		local wrapped = wrap(child, cluster.id, now)
 		wrapped.launchUntil = now + split.launchTime
 		local shot = Army.clusterRadius(#back, settings.formationSpacing) + Army.clusterRadius(#front, settings.formationSpacing) + split.launchDistance
-		wrapped.launchX, wrapped.launchZ = clearAhead(backX, backZ, fx, fz, shot)
+		-- As far as the ground is clear, then kept relative to the group it left.
+		local spotX, spotZ = clearAhead(backX, backZ, fx, fz, shot)
+		wrapped.launchOffX, wrapped.launchOffZ = spotX - backX, spotZ - backZ
+		wrapped.launchFrom = cluster
 		table.insert(army.clusters, wrapped)
 		made += 1
 	end
@@ -517,8 +526,9 @@ local function clusterTargets(army: PlayerArmy, plan: Plan, now: number): { [Arm
 	local lead = Vector2.new(army.lead.x, army.lead.z)
 	local goal = Navigation.goalOf(army.nav) or lead
 	for _, ac in plan.holding do
-		if ac.launchUntil > 0 then
-			targets[ac] = Vector2.new(ac.launchX, ac.launchZ)
+		local from = ac.launchFrom
+		if ac.launchUntil > 0 and from then
+			targets[ac] = Vector2.new(from.center.x + ac.launchOffX, from.center.z + ac.launchOffZ)
 		else
 			targets[ac] = aimFor(ac, army, now)
 		end
@@ -688,10 +698,15 @@ local function steerCluster(army: PlayerArmy, ac: ArmyCluster, target: Vector2, 
 	-- Freshly split: shoot out to the launch point, then fall back into the blob.
 	if ac.launchUntil > 0 and (now >= ac.launchUntil or (arriving and d < 10)) then
 		ac.launchUntil = 0
+		ac.launchFrom = nil
 	end
 	local launching = ac.launchUntil > 0
-	-- Size alone sets a group's speed (smaller is quicker), except for the short lunge after a split.
-	local speed = clusterBaseSpeed(ac, armySpeed) * (if launching then split.launchBoost * split.followSpeedMultiplier else pace)
+	-- Size alone sets a group's speed (smaller is quicker), except for the short burst
+	-- after a split. The burst fades over the last LAUNCH_EASE px, but never below
+	-- marching speed (the army keeps moving, and a slower group would be caught up).
+	local burst = split.launchBoost * split.followSpeedMultiplier - 1
+	local boost = 1 + burst * math.min(1, d / LAUNCH_EASE)
+	local speed = clusterBaseSpeed(ac, armySpeed) * (if launching then boost else pace)
 	if launching then
 		throttle = 1
 	else

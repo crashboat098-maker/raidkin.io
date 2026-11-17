@@ -33,6 +33,7 @@ local Bots = require(script.Parent.Bots)
 local Map = require(ReplicatedStorage.Shared.Map)
 local Castles = require(script.Parent.Castles)
 local Arena = require(script.Parent.Arena)
+local Profiles = require(script.Parent.Profiles)
 
 -- Arena duellists only fight each other: nobody outside helps or harms them.
 Combat.canFight = Arena.canFight :: any
@@ -90,6 +91,8 @@ type Competitor = {
 	-- restarted army from the one that qualified.
 	lives: number,
 	kills: number,
+	-- Kills already added to the player's saved totals (see bank).
+	killsBanked: number,
 	steerX: number,
 	steerZ: number,
 	-- When it last let a soldier go (holding Q can't empty an army in a blink).
@@ -170,7 +173,18 @@ local function spawnSpot(): (number, number)
 end
 
 -- (Re)start a competitor as a fresh army of startingSoldiers, somewhere safe.
+-- Add a player's new kills and best army to their saved totals.
+local function bank(c: Competitor)
+	local player = c.player
+	if player then
+		Profiles.add(player, c.kills - c.killsBanked, c.bestArmy, 0)
+		c.killsBanked = c.kills
+	end
+end
+
 local function startArmy(c: Competitor)
+	bank(c)
+	c.killsBanked = 0
 	local x, z = spawnSpot()
 	c.army = PlayerArmy.new(c.id, c.colorIndex, x, z)
 	c.alive = true
@@ -199,6 +213,7 @@ local function newCompetitor(name: string, colorIndex: number): Competitor
 		alive = false,
 		lives = 0,
 		kills = 0,
+		killsBanked = 0,
 		steerX = 0,
 		steerZ = 0,
 		lastSurrenderAt = 0,
@@ -236,6 +251,8 @@ local function onPlayerAdded(player: Player)
 	if player.Character then
 		player.Character:Destroy()
 	end
+	-- Phones steer with our own joystick (see the client's TouchControls), not Roblox's.
+	player.DevTouchMovementMode = Enum.DevTouchMovementMode.Scriptable
 	playersJoined += 1
 	local c = newCompetitor(string.upper(player.DisplayName), playerColors[(playersJoined - 1) % #playerColors + 1])
 	c.player = player
@@ -251,7 +268,18 @@ local function onPlayerAdded(player: Player)
 	player.ReplicationFocus = focus
 	c.focus = focus
 	byPlayer[player] = c
-	startArmy(c)
+	-- The army appears once they press PLAY on the start screen (see "Play").
+	-- Their saved progress, and the name and colour they picked last time.
+	task.spawn(function()
+		local profile = Profiles.load(player)
+		if profile.name then
+			player:SetAttribute("RaidkinName", profile.name)
+		end
+		if profile.color then
+			player:SetAttribute("RaidkinColor", profile.color)
+		end
+		player:SetAttribute("ProfileReady", true)
+	end)
 end
 
 Players.PlayerAdded:Connect(onPlayerAdded)
@@ -264,6 +292,8 @@ Players.PlayerRemoving:Connect(function(player)
 		return
 	end
 	byPlayer[player] = nil
+	bank(c)
+	task.spawn(Profiles.release, player)
 	if c.focus then
 		c.focus:Destroy()
 	end
@@ -354,6 +384,60 @@ surrenderRemote.OnServerEvent:Connect(function(player, x: unknown, z: unknown)
 	end
 end)
 
+--[[
+	PLAY on the start screen, with the army's name and colour. The name goes
+	through Roblox's text filter (everyone sees it); the colour must be one no
+	bot uses and no other army has right now, else the next free one.
+]]
+local TextService = game:GetService("TextService")
+local NAME_MAX = 16
+local playRemote = remote("Play")
+local function colorTaken(c: Competitor, i: number): boolean
+	if table.find(Config.bots.colors, i) then
+		return true
+	end
+	for _, other in competitors do
+		if other ~= c and other.alive and other.colorIndex == i then
+			return true
+		end
+	end
+	return false
+end
+playRemote.OnServerEvent:Connect(function(player, name: unknown, color: unknown)
+	local c = byPlayer[player]
+	if not c or c.alive then
+		return
+	end
+	local wanted = if typeof(name) == "string" then name else ""
+	wanted = string.upper(string.sub((string.gsub(wanted, "%c", "")), 1, NAME_MAX))
+	wanted = (string.gsub(wanted, "^%s+", ""))
+	wanted = (string.gsub(wanted, "%s+$", ""))
+	if wanted == "" then
+		wanted = string.upper(player.DisplayName)
+	end
+	local ok, filtered = pcall(function()
+		return TextService:FilterStringAsync(wanted, player.UserId):GetNonChatStringForBroadcastAsync()
+	end)
+	c.name = if ok and typeof(filtered) == "string" and filtered ~= "" then string.upper(filtered) else string.upper(player.DisplayName)
+
+	local index = if typeof(color) == "number" and color == color then math.floor(color) else c.colorIndex
+	if index < 1 or index > #Config.colors then
+		index = c.colorIndex
+	end
+	if colorTaken(c, index) then
+		for i = 1, #Config.colors do
+			if not colorTaken(c, i) then
+				index = i
+				break
+			end
+		end
+	end
+	c.colorIndex = index
+	Profiles.setChoice(player, c.name, index)
+	startArmy(c)
+	c.statsDirty = true
+end)
+
 -- PLAY AGAIN after being beaten.
 respawnRemote.OnServerEvent:Connect(function(player)
 	local c = byPlayer[player]
@@ -431,6 +515,26 @@ local function packSoldier(flat: { number }, id: number, x: number, z: number, y
 	table.insert(flat, health)
 end
 
+-- Blows struck since the last snapshot, for players' games to draw (sword swings,
+-- arrows, sparks): { attacker x, z, target x, z, ranged (0/1), attacker id, ... }.
+-- Only so many per snapshot: in a huge battle the rest are just not drawn.
+local MAX_HITS_SENT = 150
+local pendingHits: { number } = {}
+local function recordHits(hits: { Combat.Hit })
+	for _, h in hits do
+		if #pendingHits >= MAX_HITS_SENT * 6 then
+			return
+		end
+		local a, t = h.attacker, h.target
+		table.insert(pendingHits, math.round(a.x))
+		table.insert(pendingHits, math.round(a.z))
+		table.insert(pendingHits, math.round(t.x))
+		table.insert(pendingHits, math.round(t.z))
+		table.insert(pendingHits, if h.ranged then 1 else 0)
+		table.insert(pendingHits, a.id)
+	end
+end
+
 local function sendSnapshot()
 	local armies = {}
 	for _, c in competitors do
@@ -440,7 +544,14 @@ local function sendSnapshot()
 			for _, s in soldiers do
 				packSoldier(flat, s.id, s.x, s.z, s.yaw, s.moving, ROLE_CODE[s.role], math.ceil(s.hp / s.maxHp * 100))
 			end
-			table.insert(armies, { id = c.id, color = c.colorIndex, cx = round1(c.army.lead.x), cz = round1(c.army.lead.z), speed = round1(c.army.leadSpeed), soldiers = flat })
+			-- Where each split-off group is (players' games plant a banner there).
+			local groups = {}
+			for i = 2, #c.army.clusters do
+				local centre = c.army.clusters[i].cluster.center
+				table.insert(groups, math.round(centre.x))
+				table.insert(groups, math.round(centre.z))
+			end
+			table.insert(armies, { id = c.id, color = c.colorIndex, cx = round1(c.army.lead.x), cz = round1(c.army.lead.z), speed = round1(c.army.leadSpeed), soldiers = flat, groups = groups })
 		end
 	end
 	local neutrals = {}
@@ -450,7 +561,8 @@ local function sendSnapshot()
 		end
 	end
 	table.insert(armies, { id = 0, color = 0, cx = 0, cz = 0, soldiers = neutrals })
-	snapshotRemote:FireAllClients({ t = Workspace:GetServerTimeNow(), armies = armies })
+	snapshotRemote:FireAllClients({ t = Workspace:GetServerTimeNow(), armies = armies, hits = pendingHits })
+	pendingHits = {}
 end
 
 local function sendStats(c: Competitor)
@@ -611,6 +723,8 @@ end
 local function sendBoard()
 	local rows = {}
 	for _, c in competitors do
+		-- Keep the saved totals (and Roblox's player list) up to date as you play.
+		bank(c)
 		table.insert(rows, {
 			id = c.id,
 			name = c.name,
@@ -771,6 +885,7 @@ local function step(now: number)
 
 	-- 3. Blows land and lava burns; the fallen leave bodies.
 	local hits = Combat.resolveAttacks(fighters, now)
+	recordHits(hits)
 	local burnt = burnInLava(now)
 	if #hits > 0 or burnt then
 		for _, death in Combat.removeDead(fighters, hits) do
@@ -810,6 +925,12 @@ local function step(now: number)
 		end
 		(loser :: any).statsDirty = true
 	end
+	-- An arena duel won counts toward the winner's saved Wins.
+	local finished = arena.finished
+	local champion = if finished then finished.winner :: any else nil
+	if champion and champion.player then
+		Profiles.add(champion.player, 0, 0, 1)
+	end
 	if Arena.phase ~= lastArenaPhase then
 		lastArenaPhase = Arena.phase
 		sendArena()
@@ -831,6 +952,8 @@ local function step(now: number)
 				c.respawnAt = now + Config.bots.respawnDelay
 			elseif c.player then
 				defeatRemote:FireClient(c.player, { kills = c.kills, bestArmy = c.bestArmy, shards = c.resources.shards })
+				bank(c)
+				task.spawn(Profiles.save, c.player)
 			end
 		end
 	end

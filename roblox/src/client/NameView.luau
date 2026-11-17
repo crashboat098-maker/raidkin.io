@@ -5,6 +5,7 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"))
 local Ground = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Ground"))
+local Art = require(script.Parent:WaitForChild("Art"))
 
 local S = Config.STUDS_PER_PX
 local HEIGHT = 7
@@ -49,7 +50,7 @@ local function tagFor(id: number): Tag
 end
 
 -- Place a tag over every army: `armies` gives where each one is, `names` and `colors` who it is.
-function NameView.draw(armies: { { id: number, color: number, cx: number, cz: number } }, names: { [number]: string })
+function NameView.draw(armies: { any }, names: { [number]: string })
 	for _, tag in tags do
 		tag.seen = false
 	end
@@ -60,7 +61,17 @@ function NameView.draw(armies: { { id: number, color: number, cx: number, cz: nu
 			tag.seen = true
 			tag.label.Text = name
 			tag.label.TextColor3 = Config.colors[army.color] or Config.neutralColor
-			tag.anchor.CFrame = CFrame.new(army.cx * S, Ground.height() + HEIGHT, army.cz * S)
+			if Art.enabled then
+				-- Looking straight down, height doesn't show: like the web game, the tag sits
+				-- north of the army instead, 18 px over its topmost soldier.
+				local top = army.cz
+				for _, soldier in army.soldiers do
+					top = math.min(top, soldier.z)
+				end
+				tag.anchor.CFrame = CFrame.new(army.cx * S, Ground.height() + 1, (top - 24) * S)
+			else
+				tag.anchor.CFrame = CFrame.new(army.cx * S, Ground.height() + HEIGHT, army.cz * S)
+			end
 		end
 	end
 	for id, tag in tags do

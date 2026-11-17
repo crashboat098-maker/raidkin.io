@@ -91,12 +91,11 @@ export type Settings = {
 	minSpeedMultiplier: number,
 }
 
--- Soldiers head straight for their spot: at least FOLLOW_BOOST times the
--- army's speed (so they keep pace with no lag), and FOLLOW_GAIN times the gap
--- when further off (so they catch up fast after a turn), never past it.
--- The same rule as the web game (and the original Raidkin).
+-- Soldiers head straight for their spot at their own top speed (faster when far
+-- behind: see catchUpMultiplier), or FOLLOW_BOOST times their group's speed if
+-- that's quicker, so they keep pace with no lag. Never faster, so a group that
+-- lunges (a split) never drags its soldiers along in a leap. (As the web game.)
 local FOLLOW_BOOST = 1.45
-local FOLLOW_GAIN = 3.5
 -- Pressing against a wall this long (seconds) while trying to walk sends a soldier looking for a way round.
 local WALL_STUCK = 0.25
 -- A soldier this far from its spot counts as fallen behind and may run faster.
@@ -554,7 +553,7 @@ function Army.updateSoldiers(army: Army, dt: number, settings: Settings, ground:
 		if engaged then
 			speed = if distance < ENGAGE_STANDOFF then 0 else math.min(topSpeed, (distance - ENGAGE_STANDOFF) * 6 + 12)
 		elseif arriving then
-			speed = math.min(distance / math.max(dt, 1e-4), math.max(topSpeed, centerSpeed * FOLLOW_BOOST, distance * FOLLOW_GAIN))
+			speed = math.min(distance / math.max(dt, 1e-4), math.max(topSpeed, centerSpeed * FOLLOW_BOOST))
 		elseif soldier.route.mode == "center" then
 			speed = if distance < CENTER_STANDOFF then 0 else math.min(topSpeed, (distance - CENTER_STANDOFF) * 5 + 10)
 		end

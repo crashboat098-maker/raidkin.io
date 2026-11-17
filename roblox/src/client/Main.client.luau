@@ -27,6 +27,9 @@ local Hud = require(script.Parent:WaitForChild("Hud"))
 -- The web game's real pixel art, once its images are uploaded (see Art); else the 3D look.
 local Art = require(script.Parent:WaitForChild("Art"))
 local SpriteLayer = require(script.Parent:WaitForChild("SpriteLayer"))
+local TouchControls = require(script.Parent:WaitForChild("TouchControls"))
+local Minimap = require(script.Parent:WaitForChild("Minimap"))
+local StartScreen = require(script.Parent:WaitForChild("StartScreen"))
 
 local camera = Workspace.CurrentCamera
 
@@ -125,9 +128,19 @@ snapshotRemote.OnClientEvent:Connect(function(message)
 				health = flat[i + 6],
 			}
 		end
-		table.insert(armies, { id = a.id, color = a.color, cx = a.cx, cz = a.cz, speed = a.speed, soldiers = soldiers })
+		-- Where each of the army's split-off groups is (for their banners).
+		local groups = {}
+		local g = a.groups or {}
+		for i = 1, #g, 2 do
+			table.insert(groups, Vector2.new(g[i], g[i + 1]))
+		end
+		table.insert(armies, { id = a.id, color = a.color, cx = a.cx, cz = a.cz, speed = a.speed, soldiers = soldiers, groups = groups })
 	end
 	table.insert(snapshots, { t = message.t, armies = armies })
+	-- Blows struck: sword swings, arrows and sparks (see SpriteLayer).
+	if Art.enabled and message.hits then
+		SpriteLayer.hits(message.hits, os.clock())
+	end
 	if #snapshots > 10 then
 		table.remove(snapshots, 1)
 	end
@@ -168,7 +181,7 @@ local function blendedArmies(renderTime: number): { ArmyView.ArmyState }
 		end
 		local cx = if prev then prev.cx + (army.cx - prev.cx) * a else army.cx
 		local cz = if prev then prev.cz + (army.cz - prev.cz) * a else army.cz
-		table.insert(result, { id = army.id, color = army.color, cx = cx, cz = cz, soldiers = soldiers })
+		table.insert(result, { id = army.id, color = army.color, cx = cx, cz = cz, soldiers = soldiers, groups = army.groups })
 	end
 	return result
 end
@@ -221,6 +234,11 @@ local function readSteering(): (number, number)
 		return x / length, z / length
 	end
 
+	-- Phones and tablets: the on-screen joystick.
+	if TouchControls.active() then
+		return TouchControls.x, TouchControls.z
+	end
+
 	-- The mouse: steer toward the pointer. The camera looks north (screen up = -z).
 	local dx, dz, screen = mouseOffset()
 	if dx and dz and screen > 0 then
@@ -257,10 +275,7 @@ end
 -- SPACE splits the army toward where you're steering (or, standing still, toward
 -- the mouse pointer even when it's close to the middle).
 local splitRemote = remotes:WaitForChild("Split") :: RemoteEvent
-UserInputService.InputBegan:Connect(function(input, typing)
-	if typing or input.KeyCode ~= Enum.KeyCode.Space then
-		return
-	end
+local function split()
 	local x, z = readSteering()
 	local dx, dz = mouseOffset()
 	if dx and dz and (Art.enabled or (x == 0 and z == 0)) then
@@ -268,15 +283,17 @@ UserInputService.InputBegan:Connect(function(input, typing)
 		x, z = dx, dz
 	end
 	splitRemote:FireServer(x, z)
+end
+UserInputService.InputBegan:Connect(function(input, typing)
+	if not typing and input.KeyCode == Enum.KeyCode.Space then
+		split()
+	end
 end)
 
 -- Q or right-click surrenders a soldier: the one furthest toward the mouse
 -- pointer (or where you're steering) leaves the army and turns neutral.
 local surrenderRemote = remotes:WaitForChild("Surrender") :: RemoteEvent
-UserInputService.InputBegan:Connect(function(input, typing)
-	if typing or not (input.KeyCode == Enum.KeyCode.Q or input.UserInputType == Enum.UserInputType.MouseButton2) then
-		return
-	end
+local function surrender()
 	-- Toward the pointer, from the army itself.
 	local dx, dz = mouseOffset()
 	local x, z = dx or 0, dz or 0
@@ -284,7 +301,14 @@ UserInputService.InputBegan:Connect(function(input, typing)
 		x, z = readSteering()
 	end
 	surrenderRemote:FireServer(x, z)
+end
+UserInputService.InputBegan:Connect(function(input, typing)
+	if not typing and (input.KeyCode == Enum.KeyCode.Q or input.UserInputType == Enum.UserInputType.MouseButton2) then
+		surrender()
+	end
 end)
+-- The on-screen SPLIT and SURRENDER buttons (phones and tablets).
+TouchControls.connect(split, surrender)
 
 -- ---------------------------------------------------------------------------
 -- Camera
@@ -302,29 +326,54 @@ local ZOOM_OUT = math.tan(math.rad(70 / 2)) / math.tan(math.rad(FIELD_OF_VIEW / 
 local cameraDistance = 70 * ZOOM_OUT
 local focus = Vector3.new(Config.world.size * S / 2, 0, Config.world.size * S / 2)
 
+-- How far the army spreads (world px), smoothed (see updateCamera).
+local cameraSpread = 0
+
 local function updateCamera(army: ArmyView.ArmyState?, dt: number)
 	camera.CameraType = Enum.CameraType.Scriptable
 	camera.FieldOfView = FIELD_OF_VIEW
 	if army then
+		-- Centred on where we steer, like the web game. (Not on the middle of the
+		-- soldiers: the formation sits a little off the steering point, and with the
+		-- mouse on the middle of the screen the army would chase it forever.)
+		local cx, cz = army.cx, army.cz
 		local count = 0
 		local reach = 0
+		local distances: { number } = {}
 		for _, s in army.soldiers do
 			count += 1
-			reach = math.max(reach, math.sqrt((s.x - army.cx) ^ 2 + (s.z - army.cz) ^ 2))
+			local d = math.sqrt((s.x - cx) ^ 2 + (s.z - cz) ^ 2)
+			reach = math.max(reach, d)
+			table.insert(distances, d)
 		end
 		-- Pull back as the army grows, and far enough to keep every split group on screen.
 		local wanted = math.max(55 + math.sqrt(count) * 6, reach * S * 2.4 + 20) * ZOOM_OUT
+		local rate = if wanted > cameraDistance then 3 else 1.2
 		if Art.enabled then
-			-- The web game's framing (CameraZoom): keep (spread x 2.4 + 60) world px above
-			-- and below the middle, showing between 277 and 720 px of the map's height.
-			local halfHeight = math.clamp(reach * 2.4 + 60, 720 / 2.6 / 2, 720 / 2)
+			-- The web game's framing (CameraZoom): how far the army spreads from the
+			-- middle, ignoring the furthest few (one straggler doesn't count), smoothed:
+			-- it grows quickly (nobody runs off screen) and shrinks slowly. Then keep
+			-- (spread x 2.4 + 60) world px above and below the middle, showing between
+			-- 277 and 720 px of the map's height. Tiny changes are ignored, so it never
+			-- shimmers in and out.
+			local measured = reach
+			if count > 12 then
+				table.sort(distances)
+				measured = distances[math.floor(count * 0.95)] or reach
+			end
+			local spreadRate = if measured > cameraSpread then 3 else 0.6
+			cameraSpread += (measured - cameraSpread) * math.min(1, dt * spreadRate)
+			local halfHeight = math.clamp(cameraSpread * 2.4 + 60, 720 / 2.6 / 2, 720 / 2)
 			wanted = halfHeight * S / math.tan(math.rad(FIELD_OF_VIEW / 2))
+			if math.abs(wanted - cameraDistance) / cameraDistance < 0.004 then
+				wanted = cameraDistance
+			end
+			-- Zooming out reacts faster than zooming back in.
+			rate = if wanted > cameraDistance then 1.6 else 0.7
 		end
-		-- Zooming out reacts faster than zooming back in.
-		local rate = if wanted > cameraDistance then (if Art.enabled then 1.6 else 3) else (if Art.enabled then 0.7 else 1.2)
 		cameraDistance += (wanted - cameraDistance) * math.min(1, dt * rate)
 		-- Locked on the army (no trailing), like the web version.
-		focus = Vector3.new(army.cx * S, Ground.height(), army.cz * S)
+		focus = Vector3.new(cx * S, Ground.height(), cz * S)
 	end
 	if Art.enabled then
 		-- Pixel art: straight down, like the web game, with screen-up north. Then the
@@ -397,13 +446,42 @@ RunService.RenderStepped:Connect(function(dt)
 	end
 	updateCamera(mine, dt)
 	if Art.enabled then
-		SpriteLayer.drawArmies(armies, now)
+		-- The minimap: one dot per group of our army, and the box of what's on screen.
+		local groups: { Vector2 } = {}
+		if mine then
+			table.insert(groups, Vector2.new(mine.cx, mine.cz))
+			for _, g in (mine :: any).groups or {} do
+				table.insert(groups, g)
+			end
+		end
+		Minimap.update(now, groups, SpriteLayer.viewRect())
+	end
+	if Art.enabled then
+		-- The army ranked #1 on the scoreboard wears the crown.
+		local leader = lastBoard[1]
+		SpriteLayer.drawArmies(armies, now, myId, if leader then leader.id else nil)
 	else
 		ArmyView.draw(armies, now)
 	end
 	NameView.draw(armies, names)
 	CastleView.draw(now)
 	ArenaView.draw(os.clock())
+end)
+
+-- The start screen: pick a name and colour, then PLAY (the army appears then).
+local playRemote = remotes:WaitForChild("Play") :: RemoteEvent
+-- It starts with the name and colour you picked last time (once your saved progress has loaded).
+task.spawn(function()
+	local me = Players.LocalPlayer
+	local waited = 0
+	while not me:GetAttribute("ProfileReady") and waited < 5 do
+		waited += task.wait(0.1)
+	end
+	local savedName = me:GetAttribute("RaidkinName")
+	local savedColor = me:GetAttribute("RaidkinColor")
+	StartScreen.show(if typeof(savedName) == "string" then savedName else me.DisplayName, if typeof(savedColor) == "number" then savedColor else 1, function(name, color)
+		playRemote:FireServer(name, color)
+	end)
 end)
 
 print(`[{Version.name}] client ready, version {Version.version}`)

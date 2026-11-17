@@ -78,11 +78,12 @@ local Config = {
 			-- children already on their way back (at most maxWaitForReturn more),
 			-- so merges cascade up into one army.
 			regroup = { min = 3, perSoldier = 0.2, max = 18, maxWaitForReturn = 8 },
-			-- The front half of each group shoots launchDistance past its partner,
-			-- launchBoost times faster, for at most launchTime seconds.
-			launchBoost = 2.2,
-			launchTime = 0.7,
-			launchDistance = 90,
+			-- The front half of each group glides out launchDistance past its partner's
+			-- edge (measured from the partner as it moves), up to launchBoost times
+			-- faster and easing off as it gets there, for at most launchTime seconds.
+			launchBoost = 1.5,
+			launchTime = 1.3,
+			launchDistance = 65,
 			-- Smaller groups get this share of the extra speed their own size would give them.
 			smallClusterBonus = 0.5,
 			-- Groups pack together like agar.io cells, keeping this gap between their edges.
