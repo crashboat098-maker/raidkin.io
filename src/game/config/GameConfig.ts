@@ -141,12 +141,13 @@ export const GameConfig = {
             regroup: { minMs: 3000, perSoldierMs: 200, maxMs: 18_000, maxWaitForReturnMs: 8000 },
             /**
              * A split is aimed at the mouse: the front half of each cluster breaks
-             * off and shoots launchDistance px past its parent's edge, launchBoost
-             * times faster, for at most launchMs. Then it falls back into the blob.
+             * off and glides out launchDistance px past its parent's edge, up to
+             * launchBoost times faster and easing off as it gets there, for at most
+             * launchMs. Then it falls back into the blob.
              */
-            launchBoost: 2.2,
-            launchMs: 700,
-            launchDistance: 90,
+            launchBoost: 1.5,
+            launchMs: 1300,
+            launchDistance: 65,
             /**
              * Smaller split clusters move a little faster than the army: they get
              * this share of the extra speed their own size would give them on the

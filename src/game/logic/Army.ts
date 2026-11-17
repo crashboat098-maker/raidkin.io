@@ -132,13 +132,12 @@ function takeDetourSearch (now: number): boolean
 /** Warriors heading for the centre (not yet in formation) stop this close to it. */
 const CENTER_STANDOFF = 10;
 /**
- * Soldiers head straight for their place: at least FOLLOW_BOOST times the
- * army's speed (so they keep pace with no lag), and FOLLOW_GAIN times the gap
- * when further off (so they catch up fast after a turn). The same rule as the
- * original Raidkin.
+ * Soldiers head straight for their place at their own top speed (faster when
+ * far behind: see catchUpMultiplier), or FOLLOW_BOOST times their group's
+ * speed if that's quicker, so they keep pace with no lag. Never faster, so a
+ * group that lunges (a split) never drags its soldiers along in a leap.
  */
 const FOLLOW_BOOST = 1.45;
-const FOLLOW_GAIN = 3.5;
 /** Fighting Warriors stop this close to their enemy (inside striking range). */
 const ENGAGE_STANDOFF = 8;
 
@@ -417,10 +416,10 @@ export function updateCluster (
         const topSpeed = settings.warriorSpeed * roleSpeed * (farBehind ? settings.catchUpMultiplier : 1) * terrain;
 
         let speed = topSpeed;
-        // Heading for my place: straight there, quick enough to keep up with the
-        // army (FOLLOW_BOOST x its speed) and quicker still the further off I am,
-        // but never past it. No springs, so nothing wobbles or lags behind.
-        if (arriving) speed = Math.min(goalDistance / Math.max(dt, 1e-4), Math.max(topSpeed, centreSpeed * FOLLOW_BOOST, goalDistance * FOLLOW_GAIN));
+        // Heading for my place: straight there at my top speed (or quick enough to
+        // keep up with my group: FOLLOW_BOOST x its speed), but never past it.
+        // No springs, so nothing wobbles or lags behind.
+        if (arriving) speed = Math.min(goalDistance / Math.max(dt, 1e-4), Math.max(topSpeed, centreSpeed * FOLLOW_BOOST));
         // Heading for the centre: stop a step short instead of crowding it.
         if (warrior.route.mode === 'center' && !engaged) speed = goalDistance < CENTER_STANDOFF ? 0 : Math.min(topSpeed, (goalDistance - CENTER_STANDOFF) * 5 + 10);
         // Fighting: close in to striking distance, then hold.

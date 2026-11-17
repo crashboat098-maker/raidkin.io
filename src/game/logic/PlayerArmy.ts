@@ -43,8 +43,13 @@ export interface ArmyCluster {
     splitAt: number;
     /** Until this time the cluster is shooting out after a split (0 = not launching). */
     launchUntil: number;
-    /** Where a freshly split cluster shoots out to (ahead of where it split, toward the mouse). */
-    launchTarget: Vec2 | null;
+    /**
+     * Where a freshly split cluster shoots out to: this far from `launchFrom` (the
+     * group it split from), toward the mouse. Measured from that group as it moves,
+     * so the leap is the same length marching or standing still.
+     */
+    launchOffset: Vec2 | null;
+    launchFrom: Cluster | null;
     /** The direction it was split toward (unit vector; zero for the root). */
     splitDir: Vec2;
     route: FollowRoute;
@@ -104,6 +109,8 @@ const STUCK_DISTANCE = 4;
 const CRUMB_SEARCH_RADIUS = 220;
 /** A group with a smaller one heading back to merge into it slows to this share of its speed. */
 const MERGE_WAIT_SPEED = 0.5;
+/** A launching group slows down over its last this many px to its launch spot. */
+const LAUNCH_EASE = 40;
 /** How often each cluster re-picks its aim along the army's route (ms, staggered). */
 const AIM_REPICK_MS = 250;
 
@@ -114,7 +121,8 @@ function wrapCluster (cluster: Cluster, parentId: number | null, splitAt: number
         parentId,
         splitAt,
         launchUntil: 0,
-        launchTarget: null,
+        launchOffset: null,
+        launchFrom: null,
         splitDir,
         route: { mode: 'direct' },
         nextPlanAt: 0,
@@ -344,7 +352,10 @@ export function splitArmy (
         child.launchUntil = launchUntil;
         const shot = clusterRadius(left.length, settings.formationSpacing) + clusterRadius(right.length, settings.formationSpacing)
             + settings.split.launchDistance;
-        child.launchTarget = clearAhead(leftCentre, forward, shot, obstacles, bounds);
+        // As far as the ground is clear, then kept relative to the group it left.
+        const spot = clearAhead(leftCentre, forward, shot, obstacles, bounds);
+        child.launchOffset = { x: spot.x - leftCentre.x, y: spot.y - leftCentre.y };
+        child.launchFrom = cluster;
         army.clusters.push(child);
         created.push({ ...leftCentre }, { ...rightCentre });
     }
@@ -452,7 +463,11 @@ function clusterTargets (army: PlayerArmy, plan: RegroupPlan, now: number, obsta
 
     for (const ac of plan.holding)
     {
-        if (ac.launchUntil > 0 && ac.launchTarget) targets.set(ac, ac.launchTarget);
+        if (ac.launchUntil > 0 && ac.launchOffset && ac.launchFrom)
+        {
+            const from = ac.launchFrom.center.position;
+            targets.set(ac, { x: from.x + ac.launchOffset.x, y: from.y + ac.launchOffset.y });
+        }
         else targets.set(ac, aimFor(ac, army, now, obstacles));
     }
 
@@ -726,13 +741,18 @@ function steerCluster (
     if (ac.launchUntil > 0 && (now >= ac.launchUntil || (arriving && d < 10)))
     {
         ac.launchUntil = 0;
-        ac.launchTarget = null;
+        ac.launchOffset = null;
+        ac.launchFrom = null;
     }
     const launching = ac.launchUntil > 0;
     // Size alone sets a cluster's speed (smaller is quicker), so a bigger group
     // can never outrun a smaller one. The one exception is the short lunge
     // right after a split.
-    const boost = launching ? settings.split.launchBoost * settings.split.followSpeedMultiplier : 1;
+    // A launch glides out and eases into place: the extra burst fades over the
+    // last LAUNCH_EASE px, but never below marching speed (the army keeps moving,
+    // and a slower group would just be caught up).
+    const burst = settings.split.launchBoost * settings.split.followSpeedMultiplier - 1;
+    const boost = launching ? 1 + burst * Math.min(1, d / LAUNCH_EASE) : 1;
     let speed = clusterBaseSpeed(ac, armySpeed, settings, movement) * (launching ? boost : pace);
     // Never outrun its own soldiers (except the short burst right after a split).
     if (!launching) speed = Math.min(speed, settings.warriorSpeed * settings.catchUpMultiplier);
